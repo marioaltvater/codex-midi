@@ -1,0 +1,6 @@
+interface:
+  display_name: "Add MIDI Controller"
+  short_description: "Add and verify a MIDI controller profile"
+  default_prompt: "Use $add-midi-controller to add support for my MIDI controller."
+policy:
+  allow_implicit_invocation: true

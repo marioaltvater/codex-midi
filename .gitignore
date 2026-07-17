@@ -1,0 +1,8 @@
+node_modules/
+dist/
+.archive/
+.codex-midi/
+codex-midi.json
+*.log
+.DS_Store
+coverage/
