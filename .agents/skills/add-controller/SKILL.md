@@ -54,28 +54,47 @@ paths or assumptions from historical commits.
 - Stop once the transport and likely mapping are clear. Do not gather unrelated
   projects or create speculative compatibility layers.
 
-### 3. Propose the mapping visually
+### 3. Design and propose the mapping
+
+Optimize for a coherent, safe, device-native surface, not for the number of
+mapped capabilities. A smaller map that is memorable and difficult to trigger
+accidentally is better than complete coverage with arbitrary layers.
+
+Before assigning controls:
+
+- start from the user's workflow and the hardware's physical affordances, putting
+  frequent reversible behavior on easy controls and consequential behavior on
+  deliberate, guarded gestures;
+- treat coherent user proposals and corrections as evidence about comfort,
+  frequency, and mental model; preserve them unless they create a real conflict,
+  safety issue, or unsupported behavior;
+- use analog or noisy inputs primarily for continuous, reversible behavior and
+  pair symmetric controls with paired behavior;
+- prefer genuine Micro inputs when the hardware naturally matches the Micro
+  surface, preserving Codex Micro settings and user remapping;
+- choose direct task slots for suitable grids or labeled surfaces, and sequential
+  navigation for constrained devices;
+- give each modifier one coherent purpose, and use aliases or duplicate outcomes
+  only for a clear fidelity, ergonomic, or accessibility benefit;
+- leave a control or capability unmapped when no natural assignment exists.
+
+Apply the relevant interaction rules in `docs/adding-a-controller.md` whenever
+the proposal uses analog inputs, modifiers, chords, repeats, overlapping
+sources, or feedback. Internally compare a minimal workflow-first layout with a
+broader-coverage layout, then present the strongest recommendation unless a
+real tradeoff needs the user's choice.
 
 Show the smallest useful physical grid, diagram, or table. Include the control
 or gesture, observed input, proposed behavior, Micro or controller-action lane,
-feedback, and evidence confidence. Propose a useful default before asking the
-user to customize it.
-
-Use these defaults unless the device suggests a better ergonomic layout:
-
-- preserve six task controls when practical;
-- map Fast, Approve, Reject, Fork, Microphone, and Submit to a clear action bank;
-- use the primary encoder and its click for the Micro knob;
-- use additional encoders for task navigation and task scrolling;
-- map a joystick or direction cluster to the Micro directions;
-- use spare labeled controls for the existing `CodexAppAction` capabilities;
-- use repeated destinations as aliases and add a modifier only when controls
-  are genuinely constrained;
-- leave unknown or unverified Micro inputs unmapped.
+activation semantics, guard or overlap behavior, feedback meaning, and evidence
+confidence. List intentional duplicates, deliberate omissions, and anything
+that still needs capture.
 
 Offer one recommended layout, then let the user accept it, adjust selected
-controls, or request a custom layout. Pause once for mapping approval unless
-the user explicitly delegated that choice.
+controls, or request a custom layout. After any revision, present the complete
+final mapping and ask for explicit approval of that exact map. Never infer
+approval from a correction or newly suggested binding unless the user delegated
+the mapping choice.
 
 ### 4. Capture only unresolved behavior
 
@@ -94,8 +113,10 @@ the user explicitly delegated that choice.
 
 ### 5. Implement the smallest adapter
 
-- Use `MidiControllerProfile` and the shared MIDI surface for MIDI hardware.
-  Implement `ControllerDefinition` directly for other transports.
+- Use `MidiControllerProfile` and the shared MIDI surface when their Note, CC,
+  action, and relative-encoder model fits the MIDI device. Implement
+  `ControllerDefinition` directly for other transports, or for demonstrated
+  MIDI behavior that cannot fit the profile without distorting it.
 - Keep hardware-specific behavior in `src/controllers/<type>/index.ts` unless
   a real second responsibility justifies another file, then register the
   definition in the explicit map.
@@ -123,14 +144,20 @@ the user explicitly delegated that choice.
   complete frames including explicit OFF. Haptics represent deduplicated state
   transitions rather than continuously animated lighting.
 - Import `@julusian/midi` only from `src/midi/index.ts`.
+- Keep native helpers and vendor-specific toolchains adapter-scoped. Add a
+  separate build or test command when needed; do not silently make unrelated
+  contributors install that toolchain through the project's normal setup.
 
 ### 6. Verify and report honestly
 
 - Add behavioral coverage for mappings and genuine vendor behavior, then run
   `bun run verify`.
-- Guide a physical pass covering every mapping, alias, modifier, action,
-  encoder direction and speed, hold, feedback state, hot-plug, reconnect,
-  handshake, and clean shutdown that the adapter claims.
+- Before exercising a consequential action in ChatGPT, prove the emitted event
+  sequence through a test sink and confirm the user is ready for the live check.
+- Guide a physical pass covering every claimed mapping and, when applicable,
+  aliases, overlap orders, modifiers, chords, analog thresholds, encoder
+  direction and speed, holds, feedback states, hot-plug, reconnect, handshake,
+  and clean shutdown.
 - Record sources, firmware, macOS and ChatGPT versions, exact ports or device
   identifiers, observed behavior, and anything not exercised.
 - Automated success is not hardware acceptance. Call an adapter **implemented
