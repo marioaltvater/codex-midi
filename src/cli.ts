@@ -1,6 +1,8 @@
 #!/usr/bin/env bun
 
+import { existsSync } from "node:fs";
 import { resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import {
   loadConfig,
   type BridgeConfig,
@@ -57,7 +59,12 @@ async function runBridge(args: string[]): Promise<void> {
     return;
   }
   const cli = parseBridgeOptions(args);
-  const fileConfig = cli.configPath === undefined ? {} : await loadConfig(resolve(cli.configPath));
+  const configPath = cli.configPath === undefined
+    ? DEFAULT_CONFIG_PATH
+    : resolve(cli.configPath);
+  const fileConfig = cli.configPath === undefined && !existsSync(configPath)
+    ? {}
+    : await loadConfig(configPath);
   const config = mergeBridgeOptions(fileConfig, cli);
   const logger = createLogger(cli.verbose);
   const controller = createController(config.controller ?? DEFAULT_CONTROLLER, { logger });
@@ -234,6 +241,7 @@ function createLogger(verbose: boolean): ControllerLogger {
 }
 
 const DEFAULT_CONTROLLER: ControllerConfig = { type: "atom" };
+const DEFAULT_CONFIG_PATH = fileURLToPath(new URL("../codex-midi.json", import.meta.url));
 
 const HELP = `codex-midi - use MIDI controllers as a Codex Micro
 

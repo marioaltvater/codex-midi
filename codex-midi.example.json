@@ -1,0 +1,11 @@
+{
+  "controller": {
+    "type": "atom",
+
+    // "inputName": "ATOM",
+    // "outputName": "ATOM",
+  },
+
+  // Advanced direct-bridge override; the launcher manages its own private socket.
+  // "socketPath": "/tmp/codex-midi.sock",
+}

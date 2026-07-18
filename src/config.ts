@@ -13,7 +13,7 @@ export interface BridgeConfig {
 
 export async function loadConfig(path: string): Promise<BridgeConfig> {
   const source = await readFile(path, "utf8");
-  const value: unknown = JSON.parse(source);
+  const value: unknown = Bun.JSON5.parse(source);
   if (!isRecord(value)) throw new TypeError("Bridge configuration must be a JSON object");
   const allowed = ["socketPath", "controller"];
   const unknownKey = Object.keys(value).find((key) => !allowed.includes(key));

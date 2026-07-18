@@ -114,29 +114,22 @@ Most users need only the launcher shown in Quick Start:
 
 ## Configuration
 
-No configuration is needed when both CoreMIDI ports are named exactly `ATOM`.
-For different exact port names, create an ignored `codex-midi.json`:
+Most people can skip this section. To choose a supported controller or
+override its MIDI port names, copy `codex-midi.example.json` to
+`codex-midi.json` and edit the copy:
 
-```json
+```json5
 {
   "controller": {
     "type": "atom",
-    "inputName": "ATOM",
-    "outputName": "ATOM"
+    // "inputName": "ATOM",
+    // "outputName": "ATOM",
   }
 }
 ```
 
-Then pass it to the launcher:
-
-```sh
-bun run launch --config "$PWD/codex-midi.json"
-```
-
-Mappings, encoder behavior, native-mode negotiation, and lighting live in the
-typed controller profile—not in JSON. `socketPath` is also available for
-advanced direct-bridge use; the launcher creates and prioritizes its own
-private ephemeral socket.
+Comments are allowed, so you can uncomment only the settings you need. The
+bridge finds `codex-midi.json` automatically.
 
 ## How it works
 

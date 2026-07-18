@@ -128,9 +128,10 @@ library again. The raw monitor opens only the selected input.
 
 ## Configuration and lifecycle
 
-Public JSON configuration contains only an optional bridge socket path,
-controller profile ID, and exact MIDI input/output overrides. Mappings and
-vendor protocols remain TypeScript so profiles stay readable and reviewable.
+The optional local `codex-midi.json` accepts JSON5 syntax and contains only a
+bridge socket path, controller profile ID, and exact MIDI input/output
+overrides. Mappings and vendor protocols remain TypeScript so profiles stay
+readable and reviewable.
 
 On MIDI or host disconnect, the bridge releases held logical inputs, closes
 native handles, resets partial protocol state, and waits to reconnect or exit.
