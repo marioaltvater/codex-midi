@@ -1,0 +1,6 @@
+interface:
+  display_name: "Add Controller"
+  short_description: "Detect, map, implement, and verify a controller"
+  default_prompt: "Use $add-controller to detect my connected controller, propose a sensible mapping, and guide me through setup."
+policy:
+  allow_implicit_invocation: true

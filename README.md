@@ -1,9 +1,9 @@
-<h1 align="center">codex-midi</h1>
+<h1 align="center">Codex MIDI</h1>
 
 <p align="center">
-  <strong>Use a supported MIDI controller as a software-emulated Codex Micro for ChatGPT on macOS.</strong>
-  <br>
-  MIDI controls, task shortcuts, encoder navigation, directional actions, and controller feedback—without modifying <code>ChatGPT.app</code> or disabling SIP.
+  <strong>Control Codex on macOS with almost any input device.</strong><br>
+
+  Don't have a Codex Micro? No problem. Codex MIDI emulates a Codex Micro and implements its full set of features — and a few more.
 </p>
 
 <p align="center">
@@ -15,139 +15,116 @@
 <p align="center">
   <a href="#quick-start">Quick start</a> ·
   <a href="#compatibility">Compatibility</a> ·
-  <a href="#adding-a-controller">Add a controller</a> ·
   <a href="#how-it-works">How it works</a> ·
   <a href="docs/architecture.md">Architecture</a>
 </p>
 
-`codex-midi` translates MIDI input and feedback from supported controllers
-into the private hardware protocol used by ChatGPT's Codex Micro integration.
-Hardware-specific behavior lives in small typed profiles, separate from the
-emulated Codex Micro and ChatGPT transport.
+`codex-midi` is a [Codex Micro](https://worklouder.cc/codex-micro) emulator and bridge for Codex, allowing you to control ChatGPT Codex with almost any device as if it were a Codex Micro — from MIDI controllers and Stream Decks to game controllers, custom hardware, and more.
+
+The PreSonus ATOM MIDI controller is the first implemented device and current reference implementation. It mirrors the Codex Micro's layout, functionality, and RGB feedback, while its extra controls provide additional shortcuts. Adding another input device is designed to be simple with the included `add-controller` skill for Codex.
 
 ## Quick start
+
+Connect or pair your device and paste the following into a fresh Codex session/project, along with the type/model of hardware:
+
+> _Follow the instructions at https://github.com/scf4/codex-midi/blob/main/docs/setup-with-codex.md and set up *\<my-device-model\>*_
+
+---
+
+The [setup instructions for Codex](docs/setup-with-codex.md) tell it to clone
+this repository, find and confirm your device, propose a sensible layout, and
+handle the implementation and verification. You can accept its recommendation,
+adjust a few controls, or define a completely custom mapping.
+
+For the complete workflow and contribution requirements, see
+[Adding a controller](docs/adding-a-controller.md).
 
 ### Requirements
 
 - macOS with the ChatGPT desktop app installed
-- A MIDI controller (e.g., PreSonus ATOM)
+- A suitable input device
 - [Bun](https://bun.sh/) 1.3.14 or newer
 
-Clone the project and install its locked dependencies:
+## Manual setup
+
+Clone the project, install its locked dependencies, and launch ChatGPT through
+the bridge:
 
 ```sh
 git clone https://github.com/scf4/codex-midi.git
 cd codex-midi
 bun install
-```
-
-Check that CoreMIDI can see your controller:
-
-```sh
-bun run midi:list
-```
-
-The bundled ATOM profile expects both ports to be named exactly `ATOM`. If
-yours differ, copy the displayed names into the [configuration](#configuration)
-first.
-
-Quit ChatGPT before running the launcher; the bridge can only attach when it
-starts a new ChatGPT process.
-
-```sh
 bun run launch
 ```
 
-When it works, ChatGPT opens and the selected controller activates its mapped
-controls and feedback. Keep the terminal open while using ChatGPT. On a normal
-or handled shutdown, quitting ChatGPT stops the bridge, releases the controller,
-restores any profile-specific device mode, and removes its temporary runtime
-directory. The per-launch token is generated in memory and is never written to
-disk.
-
-Nothing is installed persistently: no login item, app modification, `sudo`,
-SIP change, or background service.
+The launcher does not modify ChatGPT, install a background service, or create a login item.
 
 ## Compatibility
 
 | Area | Current state |
 | --- | --- |
-| **ChatGPT desktop** | Last verified with build **5440 / 26.707.91948** on **July 17, 2026**. |
-| **PreSonus ATOM** | Bundled profile with native mode, mapped controls, relative encoder, aliases, RGB feedback, and reconnect support. |
-| **Other controllers** | Not bundled yet. The typed profile boundary is ready for hardware-tested contributions. |
+| **PreSonus ATOM** | Bundled reference adapter with verified Codex Micro controls and RGB feedback. Its additional controls can show or hide sidebars, toggle Plan mode, expand/restore panels, navigate between tasks more easily, and scroll through chats using the additional rotary encoders and side controls. |
+| **Other controllers** | Use the `add-controller` skill to create an adapter for whatever device you can find. |
 
-## Adding a controller
 
-A controller adapter is one typed profile at
-`src/controllers/<type>/index.ts`, registered in the small explicit map at
-`src/controllers/index.ts`. Repeated destinations provide aliases; there is no
-dynamic plugin loader or JSON mapping language.
+### PreSonus ATOM
 
-Start from official protocol documentation, confirm behavior on the physical
-device, and keep vendor-specific mapping, sessions, and lighting in the
-profile. Before contributing, read [Adding a controller](docs/adding-a-controller.md)
-and the [Provenance policy](docs/provenance.md).
-
-## PreSonus ATOM
+The provided [ATOM](docs/controllers/atom.md) adapter maps its 16 pads, three encoders, and selected side
+controls to the Codex Micro surface along with additional controller actions.
 
 | ATOM surface | Codex behavior |
 | --- | --- |
-| Six task pads | Select task slots and show idle, thinking, complete, needs-input, and error states. |
-| Pads 2 and 3 | Operate the double-width microphone control and remain steady white. |
-| Pads 4–8 | Submit, Fast, Approve, Reject, and Fork, each with its own color. |
-| Encoder 1 | Move through controls or options; nearby button aliases click or hold the Micro knob. |
+| Six task pads | Select task slots and display idle, thinking, complete, needs-input, and error states. |
+| Pads 2 and 3 | Operate the double-width microphone control. |
+| Pads 4–8 | Submit, Fast, Approve, Reject, and Fork, each with a distinct color. |
+| Encoder 1 | Controls reasoning or moves through highlighted options, depending on Codex Micro settings. |
+| Encoders 2 and 4 | Move between tasks and scroll the visible task. |
 | Direction controls | Emit the Micro's digital up, down, left, and right actions. |
-| Native mode | Negotiate RGB control, replay lighting after reconnect, and restore ordinary mode on exit. |
+| Selected side controls | Toggle panels and Plan mode, run the default environment action, and open Codex Micro settings. |
 
 Pads 1, 13, and 16 have no Codex Micro counterpart and remain dark. See the
 [ATOM reference](docs/controllers/atom.md) for the complete physical layout,
-exact MIDI messages, encoder behavior, color rules, and protocol evidence.
-
-## Commands
-
-Most users need only the launcher shown in Quick Start:
-
-| Command | Purpose |
-| --- | --- |
-| `bun run launch` | Start the bridge and launch ChatGPT. |
-| `bun run midi:list` | List exact CoreMIDI input and output port names. |
+MIDI messages, encoder behavior, lighting rules, and verification status.
 
 ## Configuration
 
-Most people can skip this section. To choose a supported controller or
-override its MIDI port names, copy `codex-midi.example.json` to
-`codex-midi.json` and edit the copy:
+The guided setup creates `codex-midi.json` automatically. To select an
+adapter manually, create it in the project root:
 
-```json5
+```json
 {
   "controller": {
-    "type": "atom",
-    // "inputName": "ATOM",
-    // "outputName": "ATOM",
+    "type": "atom"
   }
 }
 ```
 
-Comments are allowed, so you can uncomment only the settings you need. The
-bridge finds `codex-midi.json` automatically.
+If a MIDI device uses different port names, run `bun run midi:list` and add only
+the needed overrides: `inputName`, plus `outputName` when it has a separate
+output port. Although the file keeps a `.json` extension, comments and trailing
+commas are accepted. Non-MIDI adapters normally need only their `type`.
 
 ## How it works
 
 ```mermaid
 flowchart LR
-    A["MIDI controller<br/>input + feedback"] <--> B["Typed profile<br/>MIDI surface"]
-    B <--> C["Project2077<br/>engine"]
+    A["Supported controller"] <--> B["Controller surface"]
+    B -->|"Micro inputs"| C["Project2077 engine"]
     C <--> D["Private Unix socket<br/>scoped preload"]
     D <--> E["ChatGPT<br/>Codex Micro integration"]
+    B -->|"Allowlisted controller actions"| D
+    C -->|"Optional feedback"| B
 ```
 
-The code follows those same three boundaries:
+The project has three replaceable boundaries:
 
-1. The **MIDI surface** turns controller messages into normalized Micro keys,
-   joystick movements, encoder steps, and lighting frames.
+1. The **controller surface** turns hardware input into normalized Micro events
+   and, where useful, allowlisted controller actions. MIDI is one implementation.
 2. The **Project2077 engine** implements the Codex Micro HID/RPC report model.
-3. The **ChatGPT host transport** exposes that synthetic device to one launched
-   ChatGPT process over a private local socket.
+3. The **ChatGPT host transport** exposes the synthetic device and forwards
+   controller actions to the launched ChatGPT process over a private socket.
+
+See [Architecture](docs/architecture.md) for protocol and lifecycle details.
 
 ## Development
 
@@ -157,37 +134,36 @@ Run the complete automated gate with:
 bun run verify
 ```
 
-This type-checks the project and runs the Bun test suite. The compatibility
-test starts an actual Node subprocess for the CommonJS preload, so contributors
-also need `node` on `PATH`. Normal bridge use requires only Bun.
+This type-checks the project and runs the Bun test suite. The preload
+compatibility test launches a Node subprocess, so contributors also need
+`node` on `PATH`. Normal bridge use requires only Bun.
 
-Automated coverage protects the shared MIDI, Project2077, socket, and preload
-behavior. A controller is not considered supported until its documented pass
-also succeeds on real hardware.
+Automation does not establish hardware support. A controller is supported only
+after its documented physical-device pass succeeds; until then, its adapter is
+**implemented but unverified**.
 
 ## Security and privacy
 
-- The bridge adds no network listener or remote service; reports stay on a
-  private Unix socket.
-- Manual launch uses a fresh per-launch token and scopes the preload to the
-  launched ChatGPT Electron main process.
+- The bridge adds no network listener; reports stay on a private Unix socket.
+- Manual launch uses a fresh per-launch token scoped to the launched ChatGPT
+  process.
 - The preload intercepts only the Work Louder device kit's matching `node-hid`
   request and delegates unrelated HID calls unchanged.
+- Controller actions use a fixed allowlist; adapters cannot request arbitrary
+  code or keyboard input.
 - A physical Codex Micro takes precedence over the synthetic descriptor.
-- Firmware, proprietary SDKs, application bundles, credentials, and user task
+- Firmware, proprietary SDKs, application bundles, credentials, and task
   content do not belong in this repository.
 
 This is a compatibility shim around a private app integration, not a security
-boundary guaranteed by OpenAI or Electron. Review the source before running
-it. See [Architecture](docs/architecture.md) for the complete trust boundary.
+boundary guaranteed by OpenAI or Electron. Review the source before running it.
 
-## Independent project
+## Legal
 
-See the official [Codex Micro page](https://openai.com/supply/co-lab/work-louder/)
-and [PreSonus ATOM page](https://www.presonus.com/products/atom-controller).
-`codex-midi` is not affiliated with or endorsed by OpenAI, Work Louder, or
-PreSonus. Product names and trademarks belong to their respective owners.
+`codex-midi` is an independent project and is not affiliated with or endorsed
+by OpenAI, Work Louder, PreSonus, or other hardware manufacturers. Product
+names and trademarks belong to their respective owners.
 
 ## License
 
-Original code and documentation are available under the [MIT License](LICENSE).
+[MIT License](LICENSE).

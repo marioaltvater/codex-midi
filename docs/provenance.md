@@ -6,17 +6,32 @@ redistributable vendor artifacts.
 
 ## Evidence hierarchy
 
-Use sources in this order:
+Research official sources first, then use only the additional evidence needed
+to verify or fill a documented gap:
 
-1. a manufacturer's public product, owner, programmer, or MIDI implementation
-   documentation;
-2. reproducible messages captured from hardware and software the contributor is
-   authorized to use;
-3. a clearly labeled inference, kept out of the supported path until verified.
+1. cite the manufacturer's public product, owner, programmer, protocol, or MIDI
+   implementation documentation, including its title, revision, and URL;
+2. use community research only as a cited lead or corroboration, recording the
+   project, version, URL, and its license or lack of a declared license;
+3. capture reproducible messages or events only from hardware and software the
+   contributor owns or is otherwise authorized to inspect;
+4. label any remaining inference and keep it out of the supported path until it
+   is verified.
+
+Publicly visible community code is not automatically licensed for reuse. An
+unlicensed or incompatibly licensed project may suggest a fact to verify, but
+it cannot supply implementation code or other expressive material. Prefer
+independently verified protocol facts; any actual code reuse must have a
+compatible license and preserve its required attribution.
+
+Authorized capture should be passive or narrowly targeted to documented
+behavior. Do not brute-force a protocol, record unrelated traffic, or inspect
+accounts, devices, or software outside the contributor's permission.
 
 For controller work, record the source title, revision or firmware version,
-URL when public, exact port names, capture procedure, and observed bytes. State
-where a profile differs from or fills a gap in the manual.
+URL when public, community-source license when used, exact port or device names,
+capture procedure, and observed bytes or events. State where an adapter differs
+from or fills a gap in the official documentation.
 
 For ChatGPT/Codex Micro interoperability, distinguish public product behavior
 from observations of the installed app's local device protocol. App build
@@ -49,6 +64,8 @@ origin in the test or controller documentation.
 A controller contribution should say:
 
 - which public documents were used;
+- which community sources were consulted, their license status, and how they
+  were used;
 - which facts came from live capture;
 - that the contributor was authorized to inspect the device/software involved;
 - which controller firmware, macOS version, and ChatGPT build were exercised;

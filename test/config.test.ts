@@ -43,6 +43,16 @@ test("the tracked example configuration is valid JSON5", async () => {
   });
 });
 
+test("controller selection does not require MIDI port fields", async () => {
+  const path = await writeConfig({
+    controller: { type: "xbox-controller" },
+  });
+
+  assert.deepEqual(await loadConfig(path), {
+    controller: { type: "xbox-controller" },
+  });
+});
+
 test("loadConfig accepts JSON5 comments and trailing commas", async () => {
   const path = await writeConfigSource(`{
     // Exact MIDI port overrides are optional.

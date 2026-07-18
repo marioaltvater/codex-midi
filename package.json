@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "license": "MIT",
-  "description": "Transport-neutral Codex Micro compatibility bridge for MIDI controllers",
+  "description": "Use hardware controllers with Codex in ChatGPT for macOS",
   "type": "module",
   "packageManager": "bun@1.3.14",
   "bin": {
