@@ -8,6 +8,7 @@ import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { Project2077Engine } from "../src/core/project2077-engine.js";
+import type { CodexAppAction } from "../src/controllers/controller.js";
 import { UnixSocketHostTransport } from "../src/host/unix-socket-transport.js";
 
 test("scoped preload delegates real HID and carries Project2077 reports end to end", async () => {
@@ -46,7 +47,7 @@ test("scoped preload delegates real HID and carries Project2077 reports end to e
         async start() {
           lifecycle.starts += 1;
         },
-        async applyLighting() {},
+        async applyFeedback() {},
         async stop() {
           lifecycle.stops += 1;
         },
@@ -105,6 +106,152 @@ test("scoped preload delegates real HID and carries Project2077 reports end to e
   }
 });
 
+test("preload forwards only the fixed app-action allowlist", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "codex-midi-actions-"));
+  const fixture = await writeNodeFixture(directory);
+  const socketPath = join(directory, "bridge.sock");
+  const transport = new UnixSocketHostTransport({
+    socketPath,
+    token: "action-token",
+    logger: quietLogger,
+  });
+  let connected = false;
+  await transport.start({
+    onHostReport: () => {},
+    onHostConnected: () => { connected = true; },
+    onHostDisconnected: () => {},
+  });
+
+  try {
+    const fixtureResult = runNodeFixture(fixture.runner, {
+      socketPath,
+      token: "action-token",
+      preload: resolve("shim/chatgpt-preload.cjs"),
+      electronMain: fixture.electronMain,
+      mode: "actions",
+      expectedElectronEvents: 13,
+    });
+    await waitFor(() => connected);
+
+    await expect(
+      transport.dispatch("arbitrary-command" as CodexAppAction),
+    ).rejects.toThrow("Unsupported ChatGPT action");
+
+    for (const action of [
+      "toggle-left-sidebar",
+      "toggle-review-panel",
+      "toggle-maximize-review-panel",
+      "previous-task",
+      "toggle-plan-mode",
+      "run-environment-action",
+      "open-codex-micro-settings",
+    ] as const) {
+      await transport.dispatch(action);
+    }
+    await transport.dispatch("scroll-task-up");
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 250));
+    await transport.dispatch("scroll-task-up");
+    await Promise.all([
+      transport.dispatch("scroll-task-down"),
+      transport.dispatch("scroll-task-down"),
+    ]);
+    await Promise.all([
+      transport.dispatch("scroll-task-to-bottom"),
+      transport.dispatch("next-task"),
+    ]);
+
+    const result = await fixtureResult;
+    expect(result.electron).toEqual({
+      focusCalls: 0,
+      messages: [
+        message("toggle-sidebar"),
+        message("toggle-diff-panel"),
+        command("toggleMaximizeSidePanel"),
+        command("previousThread"),
+        command("composer.togglePlanMode"),
+        command("environmentAction1"),
+        {
+          window: "focused",
+          channel: "codex_desktop:message-for-view",
+          payload: { type: "navigate-to-route", path: "/settings/codex-micro" },
+        },
+        command("nextThread"),
+      ],
+      inputs: [
+        wheel(24),
+        wheel(24),
+        wheel(-24),
+        wheel(-96),
+      ],
+      rendererActions: [
+        {
+          window: "focused",
+          action: "windows.timeline.scroll",
+          scroll: { type: "edge", edge: "bottom" },
+        },
+      ],
+    });
+    expect(Array.isArray(result.actionTimeline)).toBe(true);
+    if (!Array.isArray(result.actionTimeline)) throw new Error("Missing action timeline");
+    expect(result.actionTimeline.slice(-2)).toEqual([
+      "app-action:windows.timeline.scroll",
+      "command:nextThread",
+    ]);
+  } finally {
+    await transport.stop();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("message actions use a visible fallback while scroll failures remain nonfatal", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "codex-midi-unfocused-actions-"));
+  const fixture = await writeNodeFixture(directory);
+  const socketPath = join(directory, "bridge.sock");
+  const transport = new UnixSocketHostTransport({
+    socketPath,
+    token: "action-token",
+    logger: quietLogger,
+  });
+  let connected = false;
+  await transport.start({
+    onHostReport: () => {},
+    onHostConnected: () => { connected = true; },
+    onHostDisconnected: () => {},
+  });
+
+  try {
+    const fixtureResult = runNodeFixture(fixture.runner, {
+      socketPath,
+      token: "action-token",
+      preload: resolve("shim/chatgpt-preload.cjs"),
+      electronMain: fixture.electronMain,
+      mode: "unfocused",
+      expectedElectronEvents: 2,
+    });
+    await waitFor(() => connected);
+
+    await transport.dispatch("toggle-left-sidebar");
+    await expect(transport.dispatch("scroll-task-up")).rejects.toThrow(
+      "ChatGPT must be focused",
+    );
+    await transport.dispatch("next-task");
+
+    const result = await fixtureResult;
+    expect(result.electron).toEqual({
+      focusCalls: 0,
+      messages: [
+        { ...message("toggle-sidebar"), window: "fallback" },
+        { ...command("nextThread"), window: "fallback" },
+      ],
+      inputs: [],
+      rendererActions: [],
+    });
+  } finally {
+    await transport.stop();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 async function writeNodeFixture(directory: string) {
   const electronMain = join(directory, "electron-main.cjs");
   const runner = join(directory, "runner.cjs");
@@ -116,12 +263,72 @@ async function writeNodeFixture(directory: string) {
     "wl-device-kit",
     "dist",
   );
+  const appAssets = join(directory, "webview", "assets");
   await mkdir(nodeHid, { recursive: true });
   await mkdir(workLouder, { recursive: true });
+  await mkdir(appAssets, { recursive: true });
+  await writeFile(join(appAssets, "register-app-actions-fixture.js"), "");
   await writeFile(
     electronMain,
-    `Object.defineProperty(process.versions, "electron", { value: "test", configurable: true });
+    `const Module = require("node:module");
+Object.defineProperty(process.versions, "electron", { value: "test", configurable: true });
 Object.defineProperty(process, "type", { value: "browser", configurable: true });
+const electronState = global.__codexMidiElectronState = {
+  focusCalls: 0,
+  messages: [],
+  inputs: [],
+  rendererActions: [],
+};
+Object.defineProperty(electronState, "timeline", { value: [] });
+function createWindow(id, visible) {
+  return {
+    id,
+    isDestroyed: () => false,
+    isVisible: () => visible,
+    focus: () => { electronState.focusCalls += 1; },
+    getContentBounds: () => ({ x: 10, y: 20, width: 1200, height: 800 }),
+    webContents: {
+      isDestroyed: () => false,
+      send: (channel, payload) => {
+        electronState.messages.push({ window: id, channel, payload });
+        electronState.timeline.push(
+          payload.type === "run-command"
+            ? "command:" + payload.id
+            : "message:" + payload.type,
+        );
+      },
+      sendInputEvent: (event) => {
+        electronState.inputs.push({ window: id, event });
+        electronState.timeline.push("wheel:" + event.deltaY);
+      },
+      executeJavaScript: async (source) => {
+        if (
+          !source.includes('appActionRegistry.get("windows.timeline.scroll")') ||
+          !source.includes('"edge":"bottom"')
+        ) {
+          throw new Error("Unexpected renderer action script");
+        }
+        electronState.rendererActions.push({
+          window: id,
+          action: "windows.timeline.scroll",
+          scroll: { type: "edge", edge: "bottom" },
+        });
+        electronState.timeline.push("app-action:windows.timeline.scroll");
+      },
+    },
+  };
+}
+const focusedWindow = createWindow("focused", true);
+const fallbackWindow = createWindow("fallback", true);
+const BrowserWindow = {
+  getFocusedWindow: () => process.env.CODEX_MIDI_TEST_MODE === "unfocused" ? null : focusedWindow,
+  getAllWindows: () => [fallbackWindow, focusedWindow],
+};
+const originalLoad = Module._load;
+Module._load = function fixtureElectronLoad(request, parent, isMain) {
+  if (request === "electron") return { app: { getAppPath: () => __dirname }, BrowserWindow };
+  return Reflect.apply(originalLoad, this, [request, parent, isMain]);
+};
 `,
   );
   await writeFile(
@@ -159,7 +366,8 @@ interface NodeFixtureOptions {
   token: string;
   preload: string;
   electronMain: string;
-  mode: "unavailable" | "connected";
+  mode: "unavailable" | "connected" | "actions" | "unfocused";
+  expectedElectronEvents?: number;
 }
 
 async function runNodeFixture(
@@ -172,6 +380,7 @@ async function runNodeFixture(
       CODEX_MIDI_SOCKET: options.socketPath,
       CODEX_MIDI_TOKEN: options.token,
       CODEX_MIDI_TEST_MODE: options.mode,
+      CODEX_MIDI_EXPECTED_ELECTRON_EVENTS: String(options.expectedElectronEvents ?? 0),
       NODE_OPTIONS: `--require=${JSON.stringify(options.electronMain)} --require=${JSON.stringify(options.preload)} --trace-warnings`,
     },
     stdout: "pipe",
@@ -202,6 +411,37 @@ async function waitFor(predicate: () => boolean): Promise<void> {
     if (Date.now() >= deadline) throw new Error("Timed out waiting for shim lifecycle");
     await new Promise((resolvePromise) => setTimeout(resolvePromise, 5));
   }
+}
+
+function message(type: string) {
+  return {
+    window: "focused",
+    channel: "codex_desktop:message-for-view",
+    payload: { type },
+  };
+}
+
+function command(id: string) {
+  return {
+    window: "focused",
+    channel: "codex_desktop:message-for-view",
+    payload: { type: "run-command", id },
+  };
+}
+
+function wheel(deltaY: number) {
+  return {
+    window: "focused",
+    event: {
+      type: "mouseWheel",
+      x: 600,
+      y: 400,
+      deltaX: 0,
+      deltaY,
+      hasPreciseScrollingDeltas: true,
+      canScroll: true,
+    },
+  };
 }
 
 const quietLogger = {
@@ -272,6 +512,31 @@ async function main() {
       },
     ]);
     result.physicalDevices = scoped.first.devices();
+  }
+
+  if (["actions", "unfocused"].includes(process.env.CODEX_MIDI_TEST_MODE)) {
+    const synthetic = result.scopedDevices.find(
+      (device) => device.path === "codex-midi://project2077",
+    );
+    if (!synthetic) throw new Error("Synthetic Project2077 descriptor is missing");
+    const device = await scoped.first.HIDAsync.open(synthetic.path);
+    const expected = Number(process.env.CODEX_MIDI_EXPECTED_ELECTRON_EVENTS);
+    const deadline = Date.now() + 2_000;
+    while (
+      global.__codexMidiElectronState.messages.length +
+        global.__codexMidiElectronState.inputs.length +
+        global.__codexMidiElectronState.rendererActions.length <
+      expected
+    ) {
+      if (Date.now() >= deadline) throw new Error("Timed out waiting for Electron actions");
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    result.electron = global.__codexMidiElectronState;
+    if (process.env.CODEX_MIDI_TEST_MODE === "actions") {
+      result.actionTimeline = global.__codexMidiElectronState.timeline;
+    }
+    await device.close();
   }
 
   process.stdout.write(JSON.stringify(result));

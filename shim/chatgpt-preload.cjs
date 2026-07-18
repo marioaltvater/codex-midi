@@ -3,20 +3,27 @@
 /*
  * Deliberately dependency-free: this file executes inside ChatGPT's privileged
  * Electron main process. It only proxies Work Louder's node-hid import and
- * carries opaque 64-byte reports to the sidecar over a local Unix socket.
+ * carries opaque HID reports and a fixed set of app actions over a local socket.
  */
 
 const { EventEmitter } = require("node:events");
 const fs = require("node:fs");
 const Module = require("node:module");
 const net = require("node:net");
+const path = require("node:path");
 const { isMainThread } = require("node:worker_threads");
 
-const PROTOCOL_VERSION = 1;
+const PROTOCOL_VERSION = 2;
 const SYNTHETIC_PATH = "codex-midi://project2077";
+const VIEW_MESSAGE_CHANNEL = "codex_desktop:message-for-view";
 const REPORT_LENGTH = 64;
 const OPEN_TIMEOUT_MS = 2_000;
 const MAX_IPC_BUFFER_LENGTH = 1024 * 1024;
+const MIN_SCROLL_STEP = 24;
+const MAX_SCROLL_STEP = 96;
+const FAST_SCROLL_INTERVAL_MS = 40;
+const SLOW_SCROLL_INTERVAL_MS = 200;
+const APP_ACTION_ASSET = /^register-app-actions-[A-Za-z0-9_-]+\.js$/;
 const DEVICE_DESCRIPTOR = Object.freeze({
   path: SYNTHETIC_PATH,
   vendorId: 0x303a,
@@ -35,6 +42,7 @@ function defaultSocketPath() {
 
 const CONFIGURED_SOCKET_PATH = process.env.CODEX_MIDI_SOCKET || defaultSocketPath();
 const CONFIGURED_TOKEN = process.env.CODEX_MIDI_TOKEN || undefined;
+let rendererAppActionModule;
 
 stripInheritedPreload();
 delete process.env.CODEX_MIDI_SOCKET;
@@ -70,6 +78,9 @@ class VirtualHIDAsyncDevice extends EventEmitter {
     this._receiveBuffer = "";
     this._closed = false;
     this._closeEmitted = false;
+    this._actionQueue = Promise.resolve();
+    this._lastScrollAt = undefined;
+    this._scrollDirection = undefined;
 
     socket.setEncoding("utf8");
     socket.on("data", (chunk) => this._receive(chunk));
@@ -233,6 +244,13 @@ class VirtualHIDAsyncDevice extends EventEmitter {
         this._socket.destroy();
         return;
       }
+      if (message.type === "app-action") {
+        const receivedAt = performance.now();
+        this._actionQueue = this._actionQueue.then(() =>
+          this._handleAppAction(message, receivedAt),
+        );
+        continue;
+      }
       if (message.type !== "device-report" || typeof message.data !== "string") {
         this._emitError(new Error(`Unexpected codex-midi message: ${message.type}`));
         this._socket.destroy();
@@ -246,6 +264,61 @@ class VirtualHIDAsyncDevice extends EventEmitter {
       }
       this.emit("data", report);
     }
+  }
+
+  async _handleAppAction(message, receivedAt) {
+    if (!Number.isSafeInteger(message.id) || message.id < 1) {
+      log("ignored app action with an invalid correlation id");
+      return;
+    }
+    try {
+      await executeAppAction(message.action, this._scrollDelta(message.action, receivedAt));
+      this._sendActionResult(message.id, true);
+    } catch (error) {
+      if (message.action === "scroll-task-up" || message.action === "scroll-task-down") {
+        this._lastScrollAt = undefined;
+        this._scrollDirection = undefined;
+      }
+      this._sendActionResult(
+        message.id,
+        false,
+        error instanceof Error ? error.message : String(error),
+      );
+    }
+  }
+
+  _scrollDelta(action, receivedAt) {
+    if (action === "scroll-task-to-bottom") {
+      this._lastScrollAt = undefined;
+      this._scrollDirection = undefined;
+      return undefined;
+    }
+    const direction = action === "scroll-task-up"
+      ? 1
+      : action === "scroll-task-down"
+        ? -1
+        : undefined;
+    if (direction === undefined) return undefined;
+
+    const elapsed = this._scrollDirection === direction && this._lastScrollAt !== undefined
+      ? receivedAt - this._lastScrollAt
+      : Number.POSITIVE_INFINITY;
+    this._lastScrollAt = receivedAt;
+    this._scrollDirection = direction;
+    return direction * scrollStep(elapsed);
+  }
+
+  _sendActionResult(id, ok, error) {
+    if (this._closed || this._socket.destroyed) return;
+    this._socket.write(
+      `${JSON.stringify({
+        v: PROTOCOL_VERSION,
+        type: "app-action-result",
+        id,
+        ok,
+        ...(error === undefined ? {} : { error }),
+      })}\n`,
+    );
   }
 
   _emitError(error) {
@@ -263,6 +336,132 @@ class VirtualHIDAsyncDevice extends EventEmitter {
     this._closed = true;
     this.emit("close");
   }
+}
+
+async function executeAppAction(action, scrollDelta) {
+  switch (action) {
+    case "toggle-left-sidebar":
+      sendViewMessage({ type: "toggle-sidebar" });
+      return;
+    case "toggle-review-panel":
+      sendViewMessage({ type: "toggle-diff-panel" });
+      return;
+    case "toggle-maximize-review-panel":
+      sendViewMessage({ type: "run-command", id: "toggleMaximizeSidePanel" });
+      return;
+    case "previous-task":
+      sendViewMessage({ type: "run-command", id: "previousThread" });
+      return;
+    case "next-task":
+      sendViewMessage({ type: "run-command", id: "nextThread" });
+      return;
+    case "toggle-plan-mode":
+      sendViewMessage({ type: "run-command", id: "composer.togglePlanMode" });
+      return;
+    case "run-environment-action":
+      sendViewMessage({ type: "run-command", id: "environmentAction1" });
+      return;
+    case "open-codex-micro-settings":
+      sendViewMessage({ type: "navigate-to-route", path: "/settings/codex-micro" });
+      return;
+    case "scroll-task-up":
+      sendScroll(scrollDelta ?? MIN_SCROLL_STEP);
+      return;
+    case "scroll-task-down":
+      sendScroll(scrollDelta ?? -MIN_SCROLL_STEP);
+      return;
+    case "scroll-task-to-bottom":
+      await scrollToBottom();
+      return;
+    default:
+      throw new Error(`Unsupported ChatGPT action: ${String(action)}`);
+  }
+}
+
+function sendViewMessage(message) {
+  const BrowserWindow = getBrowserWindowApi();
+  const focused = BrowserWindow.getFocusedWindow();
+  const window = usableWindow(focused)
+    ? focused
+    : BrowserWindow.getAllWindows().find(
+        (candidate) => usableWindow(candidate) && candidate.isVisible(),
+      );
+  if (!window) throw new Error("No ChatGPT window is available");
+  window.webContents.send(VIEW_MESSAGE_CHANNEL, message);
+}
+
+function sendScroll(deltaY) {
+  const window = getFocusedChatGPTWindow();
+  const bounds = window.getContentBounds();
+  window.webContents.sendInputEvent({
+    type: "mouseWheel",
+    x: Math.floor(bounds.width / 2),
+    y: Math.floor(bounds.height / 2),
+    deltaX: 0,
+    deltaY,
+    hasPreciseScrollingDeltas: true,
+    canScroll: true,
+  });
+}
+
+function scrollStep(elapsedMs) {
+  if (elapsedMs >= SLOW_SCROLL_INTERVAL_MS) return MIN_SCROLL_STEP;
+  if (elapsedMs <= FAST_SCROLL_INTERVAL_MS) return MAX_SCROLL_STEP;
+  const speed = (SLOW_SCROLL_INTERVAL_MS - elapsedMs) /
+    (SLOW_SCROLL_INTERVAL_MS - FAST_SCROLL_INTERVAL_MS);
+  return Math.round(MIN_SCROLL_STEP + speed * (MAX_SCROLL_STEP - MIN_SCROLL_STEP));
+}
+
+async function scrollToBottom() {
+  const window = getFocusedChatGPTWindow();
+  const modulePath = getRendererAppActionModule();
+  const action = {
+    type: "windows.timeline.scroll",
+    windowId: "current",
+    scroll: { type: "edge", edge: "bottom" },
+  };
+  await window.webContents.executeJavaScript(
+    `import(${JSON.stringify(modulePath)}).then(({ appActionRegistry }) => appActionRegistry.get("windows.timeline.scroll")(${JSON.stringify(action)}))`,
+    true,
+  );
+}
+
+function getRendererAppActionModule() {
+  if (rendererAppActionModule !== undefined) return rendererAppActionModule;
+  const electron = require("electron");
+  const assets = path.join(electron.app.getAppPath(), "webview", "assets");
+  const filename = fs.readdirSync(assets).find((entry) => APP_ACTION_ASSET.test(entry));
+  if (filename === undefined) throw new Error("ChatGPT app actions are unavailable");
+  rendererAppActionModule = `./assets/${filename}`;
+  return rendererAppActionModule;
+}
+
+function getBrowserWindowApi() {
+  const electron = require("electron");
+  if (
+    !electron ||
+    !electron.BrowserWindow ||
+    typeof electron.BrowserWindow.getFocusedWindow !== "function" ||
+    typeof electron.BrowserWindow.getAllWindows !== "function"
+  ) {
+    throw new Error("ChatGPT window API is unavailable");
+  }
+  return electron.BrowserWindow;
+}
+
+function getFocusedChatGPTWindow() {
+  const window = getBrowserWindowApi().getFocusedWindow();
+  if (!usableWindow(window)) throw new Error("ChatGPT must be focused");
+  return window;
+}
+
+function usableWindow(window) {
+  return (
+    window &&
+    !window.isDestroyed() &&
+    window.webContents &&
+    !window.webContents.isDestroyed()
+  );
 }
 
 function createNodeHidProxy(realNodeHid, options = {}) {

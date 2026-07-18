@@ -7,6 +7,7 @@ import { chmod, lstat, mkdir, rm } from "node:fs/promises";
 import { createConnection, createServer, type Server, type Socket } from "node:net";
 import { dirname } from "node:path";
 import {
+  type AppActionMessage,
   BRIDGE_PROTOCOL_VERSION,
   decodeReportData,
   encodeIpcMessage,
@@ -15,6 +16,9 @@ import {
   type DeviceReportMessage,
 } from "./shim-protocol.js";
 import type { CodexHostTransport, HostReportHandler } from "../core/codex-micro.js";
+import type { AppActionDispatcher, CodexAppAction } from "../controllers/controller.js";
+
+const ACTION_TIMEOUT_MS = 2_000;
 
 interface ClientState {
   socket: Socket;
@@ -24,20 +28,29 @@ interface ClientState {
   processing: Promise<void>;
 }
 
+interface PendingAction {
+  client: ClientState;
+  resolve: () => void;
+  reject: (error: Error) => void;
+  timeout: ReturnType<typeof setTimeout>;
+}
+
 interface UnixSocketTransportOptions {
   socketPath?: string;
   token?: string;
   logger?: Pick<Console, "debug" | "info" | "warn" | "error">;
 }
 
-export class UnixSocketHostTransport implements CodexHostTransport {
+export class UnixSocketHostTransport implements CodexHostTransport, AppActionDispatcher {
   readonly socketPath: string;
   readonly #logger: Pick<Console, "debug" | "info" | "warn" | "error">;
   readonly #token: string | undefined;
   readonly #clients = new Set<ClientState>();
+  readonly #pendingActions = new Map<number, PendingAction>();
   #handler: HostReportHandler | null = null;
   #server: Server | null = null;
   #ownsSocket = false;
+  #nextActionId = 1;
 
   constructor(options: UnixSocketTransportOptions = {}) {
     this.socketPath =
@@ -101,12 +114,46 @@ export class UnixSocketHostTransport implements CodexHostTransport {
     );
   }
 
+  dispatch(action: CodexAppAction): Promise<void> {
+    const client = [...this.#clients].find(
+      (candidate) => candidate.ready && !candidate.closing && !candidate.socket.destroyed,
+    );
+    if (client === undefined) {
+      return Promise.reject(new Error("No ChatGPT host is connected"));
+    }
+
+    const id = this.#nextActionId;
+    this.#nextActionId += 1;
+    const message: AppActionMessage = {
+      v: BRIDGE_PROTOCOL_VERSION,
+      type: "app-action",
+      id,
+      action,
+    };
+
+    return new Promise<void>((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        if (!this.#pendingActions.delete(id)) return;
+        reject(new Error(`ChatGPT action timed out: ${action}`));
+      }, ACTION_TIMEOUT_MS);
+      this.#pendingActions.set(id, { client, resolve, reject, timeout });
+      writeSocket(client.socket, encodeIpcMessage(message)).catch((error: unknown) => {
+        const pending = this.#pendingActions.get(id);
+        if (pending === undefined) return;
+        this.#pendingActions.delete(id);
+        clearTimeout(pending.timeout);
+        pending.reject(error instanceof Error ? error : new Error(String(error)));
+      });
+    });
+  }
+
   async stop(): Promise<void> {
     const server = this.#server;
     const ownsSocket = this.#ownsSocket;
     this.#server = null;
     this.#ownsSocket = false;
     this.#handler = null;
+    this.#rejectPendingActions(undefined, "codex-midi bridge stopped");
     for (const client of this.#clients) client.socket.destroy();
     this.#clients.clear();
     if (server !== null) {
@@ -152,6 +199,7 @@ export class UnixSocketHostTransport implements CodexHostTransport {
     socket.on("close", () => {
       const wasReady = client.ready;
       this.#clients.delete(client);
+      this.#rejectPendingActions(client, "ChatGPT host disconnected");
       if (wasReady && ![...this.#clients].some((candidate) => candidate.ready)) {
         void Promise.resolve()
           .then(() => this.#handler?.onHostDisconnected())
@@ -210,6 +258,10 @@ export class UnixSocketHostTransport implements CodexHostTransport {
       return;
     }
 
+    if (message.type === "app-action-result") {
+      this.#receiveActionResult(client, message);
+      return;
+    }
     if (message.type !== "host-report") {
       this.#sendErrorAndClose(client, `Unexpected IPC message: ${String(message.type)}`);
       return;
@@ -222,6 +274,39 @@ export class UnixSocketHostTransport implements CodexHostTransport {
         client,
         error instanceof Error ? error.message : "Invalid host report",
       );
+    }
+  }
+
+  #receiveActionResult(client: ClientState, message: Record<string, unknown>): void {
+    if (!Number.isSafeInteger(message.id) || typeof message.ok !== "boolean") {
+      this.#logger.warn("ChatGPT returned an invalid app-action result");
+      return;
+    }
+    const id = message.id as number;
+    const pending = this.#pendingActions.get(id);
+    if (pending === undefined || pending.client !== client) return;
+
+    this.#pendingActions.delete(id);
+    clearTimeout(pending.timeout);
+    if (message.ok) {
+      pending.resolve();
+      return;
+    }
+    pending.reject(
+      new Error(
+        typeof message.error === "string" && message.error.length > 0
+          ? message.error
+          : "ChatGPT rejected the app action",
+      ),
+    );
+  }
+
+  #rejectPendingActions(client: ClientState | undefined, message: string): void {
+    for (const [id, pending] of this.#pendingActions) {
+      if (client !== undefined && pending.client !== client) continue;
+      this.#pendingActions.delete(id);
+      clearTimeout(pending.timeout);
+      pending.reject(new Error(message));
     }
   }
 

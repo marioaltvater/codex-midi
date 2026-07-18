@@ -3,7 +3,7 @@ import { mkdtemp, stat } from "node:fs/promises";
 import { createConnection, type Socket } from "node:net";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { test } from "bun:test";
+import { jest, test } from "bun:test";
 import type {
   CodexLightingState,
   ControllerSurface,
@@ -11,7 +11,10 @@ import type {
 } from "../src/core/codex-micro.js";
 import { Project2077Engine } from "../src/core/project2077-engine.js";
 import { UnixSocketHostTransport } from "../src/host/unix-socket-transport.js";
-import { encodeIpcMessage } from "../src/host/shim-protocol.js";
+import {
+  BRIDGE_PROTOCOL_VERSION,
+  encodeIpcMessage,
+} from "../src/host/shim-protocol.js";
 
 test("Unix transport handshakes and carries exact 64-byte reports in both directions", async () => {
   const directory = await mkdtemp(join(tmpdir(), "codex-midi-test-"));
@@ -29,17 +32,20 @@ test("Unix transport handshakes and carries exact 64-byte reports in both direct
   const lines = lineReader(client);
   client.write(
     encodeIpcMessage({
-      v: 1,
+      v: BRIDGE_PROTOCOL_VERSION,
       type: "hello",
       role: "node-hid-shim",
       path: "codex-midi://project2077",
     }),
   );
-  assert.deepEqual(await lines.next(), { v: 1, type: "hello-ack" });
+  assert.deepEqual(await lines.next(), {
+    v: BRIDGE_PROTOCOL_VERSION,
+    type: "hello-ack",
+  });
 
   const hostReport = Buffer.alloc(64, 0x5a);
   const hostLine = encodeIpcMessage({
-    v: 1,
+    v: BRIDGE_PROTOCOL_VERSION,
     type: "host-report",
     data: hostReport.toString("base64"),
   });
@@ -67,7 +73,7 @@ test("Unix transport allows only one protocol-validated Project2077 host", async
   const first = await connect(socketPath);
   const firstLines = lineReader(first);
   const hello = encodeIpcMessage({
-    v: 1,
+    v: BRIDGE_PROTOCOL_VERSION,
     type: "hello",
     role: "node-hid-shim",
     path: "codex-midi://project2077",
@@ -101,19 +107,19 @@ test("Unix transport rejects non-object JSON and ignores later queued messages",
   const client = await connect(socketPath);
   const lines = lineReader(client);
   const validHello = encodeIpcMessage({
-    v: 1,
+    v: BRIDGE_PROTOCOL_VERSION,
     type: "hello",
     role: "node-hid-shim",
     path: "codex-midi://project2077",
   });
   const validReport = encodeIpcMessage({
-    v: 1,
+    v: BRIDGE_PROTOCOL_VERSION,
     type: "host-report",
     data: Buffer.alloc(64).toString("base64"),
   });
   client.write(`null\n${validHello}${validReport}`);
   assert.deepEqual(await lines.next(), {
-    v: 1,
+    v: BRIDGE_PROTOCOL_VERSION,
     type: "error",
     message: "Invalid JSON IPC message",
   });
@@ -179,21 +185,133 @@ test("only an authenticated shim activates the controller surface", async () => 
   await engine.stop();
 });
 
+test("app actions are correlated and rejection does not close the host", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "codex-midi-action-test-"));
+  const socketPath = join(directory, "bridge.sock");
+  const transport = new UnixSocketHostTransport({ socketPath, logger: quietLogger });
+  await transport.start({ onHostReport: () => {}, ...noHostLifecycle });
+  const client = await connect(socketPath);
+  const lines = lineReader(client);
+  client.write(hello());
+  assert.equal((await lines.next()).type, "hello-ack");
+
+  const first = transport.dispatch("toggle-left-sidebar");
+  assert.deepEqual(await lines.next(), {
+    v: BRIDGE_PROTOCOL_VERSION,
+    type: "app-action",
+    id: 1,
+    action: "toggle-left-sidebar",
+  });
+  client.write(
+    encodeIpcMessage({
+      v: BRIDGE_PROTOCOL_VERSION,
+      type: "app-action-result",
+      id: 1,
+      ok: false,
+      error: "No ChatGPT window is available",
+    }),
+  );
+  await assert.rejects(first, /No ChatGPT window is available/);
+
+  const second = transport.dispatch("next-task");
+  assert.deepEqual(await lines.next(), {
+    v: BRIDGE_PROTOCOL_VERSION,
+    type: "app-action",
+    id: 2,
+    action: "next-task",
+  });
+  client.write(
+    encodeIpcMessage({
+      v: BRIDGE_PROTOCOL_VERSION,
+      type: "app-action-result",
+      id: 2,
+      ok: true,
+    }),
+  );
+  await second;
+
+  client.destroy();
+  await transport.stop();
+});
+
+test("pending actions reject when the host disconnects or the bridge stops", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "codex-midi-action-close-test-"));
+  const socketPath = join(directory, "bridge.sock");
+  const transport = new UnixSocketHostTransport({ socketPath, logger: quietLogger });
+  await transport.start({ onHostReport: () => {}, ...noHostLifecycle });
+
+  const firstClient = await connect(socketPath);
+  const firstLines = lineReader(firstClient);
+  firstClient.write(hello());
+  await firstLines.next();
+  const disconnected = transport.dispatch("toggle-plan-mode");
+  await firstLines.next();
+  const disconnectedRejection = assert.rejects(disconnected, /host disconnected/);
+  firstClient.destroy();
+  await disconnectedRejection;
+
+  const secondClient = await connect(socketPath);
+  const secondLines = lineReader(secondClient);
+  secondClient.write(hello());
+  await secondLines.next();
+  const stopped = transport.dispatch("toggle-plan-mode");
+  await secondLines.next();
+  const stoppedRejection = assert.rejects(stopped, /bridge stopped/);
+  await transport.stop();
+  await stoppedRejection;
+  secondClient.destroy();
+});
+
+test("an unanswered app action times out without closing the host", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "codex-midi-action-timeout-test-"));
+  const socketPath = join(directory, "bridge.sock");
+  const transport = new UnixSocketHostTransport({ socketPath, logger: quietLogger });
+  await transport.start({ onHostReport: () => {}, ...noHostLifecycle });
+  const client = await connect(socketPath);
+  const lines = lineReader(client);
+  client.write(hello());
+  await lines.next();
+
+  jest.useFakeTimers();
+  try {
+    const timedOut = transport.dispatch("toggle-plan-mode");
+    assert.equal((await lines.next()).type, "app-action");
+    jest.advanceTimersByTime(2_000);
+    await assert.rejects(timedOut, /timed out/);
+
+    const next = transport.dispatch("next-task");
+    const request = await lines.next();
+    client.write(
+      encodeIpcMessage({
+        v: BRIDGE_PROTOCOL_VERSION,
+        type: "app-action-result",
+        id: request.id as number,
+        ok: true,
+      }),
+    );
+    await next;
+  } finally {
+    jest.useRealTimers();
+    client.destroy();
+    await transport.stop();
+  }
+});
+
 class CountingSurface implements ControllerSurface {
   starts = 0;
   stops = 0;
   async start(_sink: SurfaceInputSink) { this.starts += 1; }
-  async applyLighting(_state: Readonly<CodexLightingState>) {}
+  async applyFeedback(_state: Readonly<CodexLightingState>) {}
   async stop() { this.stops += 1; }
 }
 
-function hello(token: string): string {
+function hello(token?: string): string {
   return encodeIpcMessage({
-    v: 1,
+    v: BRIDGE_PROTOCOL_VERSION,
     type: "hello",
     role: "node-hid-shim",
     path: "codex-midi://project2077",
-    token,
+    ...(token === undefined ? {} : { token }),
   });
 }
 

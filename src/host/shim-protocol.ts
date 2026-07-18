@@ -1,6 +1,8 @@
 /** Messages shared by the local ChatGPT preload and the Unix-socket bridge. */
 
-export const BRIDGE_PROTOCOL_VERSION = 1 as const;
+import type { CodexAppAction } from "../controllers/controller.js";
+
+export const BRIDGE_PROTOCOL_VERSION = 2 as const;
 export const SYNTHETIC_HID_PATH = "codex-midi://project2077" as const;
 
 interface ShimHello {
@@ -29,14 +31,29 @@ export interface DeviceReportMessage {
   data: string;
 }
 
+export interface AppActionMessage {
+  v: typeof BRIDGE_PROTOCOL_VERSION;
+  type: "app-action";
+  id: number;
+  action: CodexAppAction;
+}
+
+export interface AppActionResultMessage {
+  v: typeof BRIDGE_PROTOCOL_VERSION;
+  type: "app-action-result";
+  id: number;
+  ok: boolean;
+  error?: string;
+}
+
 export interface BridgeErrorMessage {
   v: typeof BRIDGE_PROTOCOL_VERSION;
   type: "error";
   message: string;
 }
 
-type ShimToBridgeMessage = ShimHello | HostReportMessage;
-type BridgeToShimMessage = HelloAck | DeviceReportMessage | BridgeErrorMessage;
+type ShimToBridgeMessage = ShimHello | HostReportMessage | AppActionResultMessage;
+type BridgeToShimMessage = HelloAck | DeviceReportMessage | AppActionMessage | BridgeErrorMessage;
 
 export function encodeIpcMessage(message: ShimToBridgeMessage | BridgeToShimMessage): string {
   return `${JSON.stringify(message)}\n`;
