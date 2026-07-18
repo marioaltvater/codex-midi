@@ -42,6 +42,8 @@ interface EncoderState {
   lastStepAt: number;
 }
 
+type ConnectionFailure = "refresh" | "open" | "session" | "lighting";
+
 const JOYSTICK_POSITIONS: Readonly<Record<JoystickDirection, number>> = {
   right: 0,
   down: 0.25,
@@ -81,6 +83,7 @@ export function createMidiSurface(
   const heldControls = new Map<string, string>();
   const heldTargets = new Map<string, HeldTarget>();
   let encoderState: EncoderState | undefined;
+  let lastConnectionFailure: ConnectionFailure | undefined;
 
   const connection: ControllerConnection = {
     logger,
@@ -89,12 +92,36 @@ export function createMidiSurface(
       output.send(message);
     },
     ready() {
-      if (input === undefined || (outputName !== undefined && output === undefined)) return;
+      if (
+        ready ||
+        input === undefined ||
+        (outputName !== undefined && output === undefined)
+      ) {
+        return;
+      }
       ready = true;
       renderedLighting.clear();
       replayLighting();
+      if (
+        input === undefined ||
+        (outputName !== undefined && output === undefined)
+      ) {
+        return;
+      }
+      lastConnectionFailure = undefined;
+      logger.info(
+        `Connected to ${profile.displayName} MIDI ${
+          outputName === undefined
+            ? `input: ${inputName}`
+            : `ports: ${inputName} / ${outputName}`
+        }`,
+      );
     },
     reconnect() {
+      warnConnectionFailure(
+        "session",
+        `${profile.displayName} MIDI session requested a reconnect`,
+      );
       closeConnection("error");
     },
   };
@@ -102,6 +129,7 @@ export function createMidiSurface(
   return {
     async start(nextSink) {
       if (sink !== undefined) return;
+      lastConnectionFailure = undefined;
       const startedGeneration = ++generation;
       sink = nextSink;
       await refreshConnection();
@@ -132,12 +160,13 @@ export function createMidiSurface(
       if (input !== undefined && (outputName === undefined || output !== undefined)) {
         const ports = await backend.listPorts();
         if (!isActive(activeGeneration)) return;
-        if (
+        const connectionLost =
           !input.isOpen() ||
           !ports.inputs.includes(inputName) ||
           (outputName !== undefined &&
-            (output === undefined || !output.isOpen() || !ports.outputs.includes(outputName)))
-        ) {
+            (output === undefined || !output.isOpen() || !ports.outputs.includes(outputName)));
+        if (connectionLost) {
+          lastConnectionFailure = undefined;
           logger.info(`${profile.displayName} MIDI port disappeared; waiting for it to return`);
           closeConnection("lost");
         }
@@ -150,6 +179,7 @@ export function createMidiSurface(
         !ports.inputs.includes(inputName) ||
         (outputName !== undefined && !ports.outputs.includes(outputName))
       ) {
+        lastConnectionFailure = undefined;
         return;
       }
 
@@ -172,26 +202,32 @@ export function createMidiSurface(
         output = candidateOutput;
       } catch (error) {
         closeMidiHandles(candidateInput, candidateOutput);
-        logger.warn(`Could not open ${profile.displayName} MIDI ports`, error);
+        warnConnectionFailure(
+          "open",
+          `Could not open ${profile.displayName} MIDI ports`,
+          error,
+        );
         return;
       }
 
-      logger.info(
-        `Connected to ${profile.displayName} MIDI ${
-          outputName === undefined
-            ? `input: ${inputName}`
-            : `ports: ${inputName} / ${outputName}`
-        }`,
-      );
       try {
         if (session === undefined) connection.ready();
         else session.connect(connection);
       } catch (error) {
-        logger.warn(`${profile.displayName} connect hook failed; reconnecting`, error);
+        warnConnectionFailure(
+          "session",
+          `${profile.displayName} connect hook failed; reconnecting`,
+          error,
+        );
         closeConnection("error");
+        return;
       }
     } catch (error) {
-      logger.warn(`Could not refresh ${profile.displayName} MIDI connection`, error);
+      warnConnectionFailure(
+        "refresh",
+        `Could not refresh ${profile.displayName} MIDI connection`,
+        error,
+      );
       closeConnection("error");
     } finally {
       connecting = false;
@@ -200,6 +236,17 @@ export function createMidiSurface(
 
   function isActive(activeGeneration: number): boolean {
     return sink !== undefined && generation === activeGeneration;
+  }
+
+  function warnConnectionFailure(
+    failure: ConnectionFailure,
+    message: string,
+    error?: unknown,
+  ): void {
+    if (lastConnectionFailure === failure) return;
+    lastConnectionFailure = failure;
+    if (error === undefined) logger.warn(message);
+    else logger.warn(message, error);
   }
 
   function handleMessage(_deltaTime: number, message: MidiMessage): void {
@@ -360,7 +407,11 @@ export function createMidiSurface(
         renderedLighting.set(frame.id, rendered);
       }
     } catch (error) {
-      logger.warn(`${profile.displayName} lighting write failed; reconnecting`, error);
+      warnConnectionFailure(
+        "lighting",
+        `${profile.displayName} lighting write failed; reconnecting`,
+        error,
+      );
       closeConnection("error");
     }
   }

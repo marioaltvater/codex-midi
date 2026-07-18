@@ -18,8 +18,9 @@ export function createMidiTestBackend(
     outputCloses: 0,
     inputOpens: 0,
     outputOpens: 0,
+    listCalls: 0,
     failOutput: false,
-    failNextSend: false,
+    sendFailures: 0,
     listFailures: 0,
     inputStatusFailures: 0,
     throwInputClose: false,
@@ -29,6 +30,7 @@ export function createMidiTestBackend(
 
   const backend: MidiBackend = {
     async listPorts() {
+      state.listCalls += 1;
       if (state.listFailures > 0) {
         state.listFailures -= 1;
         throw new Error("port enumeration failed");
@@ -71,8 +73,8 @@ export function createMidiTestBackend(
       return {
         isOpen: () => outputOpen && !closed,
         send(message) {
-          if (state.failNextSend) {
-            state.failNextSend = false;
+          if (state.sendFailures > 0) {
+            state.sendFailures -= 1;
             throw new Error("write failed");
           }
           state.sent.push([...message]);

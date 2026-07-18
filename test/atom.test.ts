@@ -161,6 +161,17 @@ describe("ATOM controller", () => {
     await fixture.surface.stop();
   });
 
+  test("does not replay lighting for duplicate native-mode acknowledgements", async () => {
+    const fixture = await startAtom();
+    await fixture.surface.applyLighting(emptyLightingState());
+    fixture.midi.emit(NATIVE_MODE_REPLY);
+    const writesAfterReady = fixture.midi.state.sent.length;
+
+    fixture.midi.emit(NATIVE_MODE_REPLY);
+    expect(fixture.midi.state.sent).toHaveLength(writesAfterReady);
+    await fixture.surface.stop();
+  });
+
   test("writes complete pad lighting through the public surface", async () => {
     const fixture = await startAtom();
     fixture.midi.emit(NATIVE_MODE_REPLY);

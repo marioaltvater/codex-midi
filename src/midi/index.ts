@@ -45,15 +45,18 @@ export function createNativeMidiBackend(
     async listPorts() {
       const { Input, Output } = await load();
       const input = new Input();
-      const output = new Output();
       try {
-        return {
-          inputs: portNames(input),
-          outputs: portNames(output),
-        };
+        const output = new Output();
+        try {
+          return {
+            inputs: portNames(input),
+            outputs: portNames(output),
+          };
+        } finally {
+          output.destroy();
+        }
       } finally {
         input.destroy();
-        output.destroy();
       }
     },
 

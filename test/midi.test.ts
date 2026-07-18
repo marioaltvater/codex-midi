@@ -20,6 +20,43 @@ test("native MIDI addon is lazy and enumeration always cleans up", async () => {
   expect(outputs.destroyed).toBe(1);
 });
 
+test("MIDI enumeration releases input when output construction fails", async () => {
+  const input = new FakeInput();
+  const backend = createNativeMidiBackend(async () => ({
+    Input: class { constructor() { return input; } },
+    Output: class { constructor() { throw new Error("output construction failed"); } },
+  }) as never);
+
+  await expect(backend.listPorts()).rejects.toThrow("output construction failed");
+  expect(input.destroyed).toBe(1);
+});
+
+test("MIDI enumeration attempts both cleanups when either one fails", async () => {
+  const outputCleanupFails = new FakeOutput();
+  outputCleanupFails.failDestroy = true;
+  const survivingInput = new FakeInput();
+  const firstBackend = createNativeMidiBackend(async () => ({
+    Input: class { constructor() { return survivingInput; } },
+    Output: class { constructor() { return outputCleanupFails; } },
+  }) as never);
+
+  await expect(firstBackend.listPorts()).rejects.toThrow("output destroy failed");
+  expect(outputCleanupFails.destroyed).toBe(1);
+  expect(survivingInput.destroyed).toBe(1);
+
+  const survivingOutput = new FakeOutput();
+  const inputCleanupFails = new FakeInput();
+  inputCleanupFails.failDestroy = true;
+  const secondBackend = createNativeMidiBackend(async () => ({
+    Input: class { constructor() { return inputCleanupFails; } },
+    Output: class { constructor() { return survivingOutput; } },
+  }) as never);
+
+  await expect(secondBackend.listPorts()).rejects.toThrow("input destroy failed");
+  expect(survivingOutput.destroyed).toBe(1);
+  expect(inputCleanupFails.destroyed).toBe(1);
+});
+
 test("native MIDI wrappers open exact ports, subscribe, send, and close", async () => {
   const input = new FakeInput();
   const output = new FakeOutput();
@@ -61,6 +98,7 @@ test("failed exact input and output opens destroy their native candidates", asyn
 
 class FakeInput {
   inputName = "In A";
+  failDestroy = false;
   destroyed = 0;
   opened = false;
   ignoredTypes: boolean[] = [];
@@ -76,12 +114,14 @@ class FakeInput {
   destroy() {
     this.destroyed += 1;
     this.opened = false;
+    if (this.failDestroy) throw new Error("input destroy failed");
   }
   emit(message: number[]) { this.handler?.(0, message); }
 }
 
 class FakeOutput {
   failOpen = false;
+  failDestroy = false;
   destroyed = 0;
   opened = false;
   sent: number[][] = [];
@@ -95,5 +135,9 @@ class FakeOutput {
   closePort() { this.opened = false; }
   isPortOpen() { return this.opened; }
   sendMessage(message: number[]) { this.sent.push(message); }
-  destroy() { this.destroyed += 1; this.opened = false; }
+  destroy() {
+    this.destroyed += 1;
+    this.opened = false;
+    if (this.failDestroy) throw new Error("output destroy failed");
+  }
 }

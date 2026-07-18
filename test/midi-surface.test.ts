@@ -6,7 +6,10 @@ import {
 } from "../src/core/codex-micro.js";
 import { createController, listControllerIds } from "../src/controllers/index.js";
 import { createMidiSurface } from "../src/controllers/midi-surface.js";
-import type { MidiControllerProfile } from "../src/controllers/controller-profile.js";
+import type {
+  ControllerSession,
+  MidiControllerProfile,
+} from "../src/controllers/controller-profile.js";
 import {
   createMidiTestBackend,
   flushPromises,
@@ -170,13 +173,37 @@ describe("MIDI controller", () => {
   test("reconnects and replays lighting after an output write fails", async () => {
     jest.useFakeTimers();
     const fixture = await startFixture();
-    fixture.midi.state.failNextSend = true;
+    fixture.midi.state.sendFailures = 1;
     const lighting = emptyLightingState();
     lighting.keys.brightness = 1;
     await fixture.surface.applyLighting(lighting);
     await advanceReconnect();
     expect(fixture.midi.state.sent).toEqual([[0x90, 1, 127]]);
     await fixture.surface.stop();
+  });
+
+  test("reports persistent lighting failures once while reconnecting", async () => {
+    jest.useFakeTimers();
+    const midi = createMidiTestBackend();
+    const info = jest.fn();
+    const warn = jest.fn();
+    const surface = createMidiSurface(profile, { type: "test" }, {
+      midi: midi.backend,
+      logger: { ...quietLogger, info, warn },
+    });
+    await surface.start({ emitKey: async () => {}, emitJoystick: async () => {} });
+
+    midi.state.sendFailures = Number.POSITIVE_INFINITY;
+    const lighting = emptyLightingState();
+    lighting.keys.brightness = 1;
+    await surface.applyLighting(lighting);
+    await advanceReconnect(2);
+
+    expect(midi.state.inputOpens).toBe(3);
+    expect(midi.state.inputCloses).toBe(3);
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(info).toHaveBeenCalledTimes(1);
+    await surface.stop();
   });
 
   test("closes a partially opened input when output opening fails", async () => {
@@ -255,6 +282,113 @@ describe("MIDI controller", () => {
     expect(midi.state.outputOpens).toBe(2);
     expect(midi.state.inputCloses).toBeGreaterThanOrEqual(1);
     await surface.stop();
+  });
+
+  test("keeps retrying while reporting a continuous enumeration failure once", async () => {
+    jest.useFakeTimers();
+    const midi = createMidiTestBackend();
+    const warn = jest.fn();
+    midi.state.listFailures = Number.POSITIVE_INFINITY;
+    const surface = createMidiSurface(profile, { type: "test" }, {
+      midi: midi.backend,
+      logger: { ...quietLogger, warn },
+    });
+
+    await surface.start({ emitKey: async () => {}, emitJoystick: async () => {} });
+    await advanceReconnect(3);
+
+    expect(midi.state.listCalls).toBe(4);
+    expect(warn).toHaveBeenCalledTimes(1);
+    await surface.stop();
+
+    await surface.start({ emitKey: async () => {}, emitJoystick: async () => {} });
+    expect(midi.state.listCalls).toBe(5);
+    expect(warn).toHaveBeenCalledTimes(2);
+    await surface.stop();
+  });
+
+  test("reports changed failures and reports the same failure again after recovery", async () => {
+    jest.useFakeTimers();
+    const midi = createMidiTestBackend();
+    const warn = jest.fn();
+    midi.state.listFailures = 1;
+    midi.state.failOutput = true;
+    const surface = createMidiSurface(profile, { type: "test" }, {
+      midi: midi.backend,
+      logger: { ...quietLogger, warn },
+    });
+
+    await surface.start({ emitKey: async () => {}, emitJoystick: async () => {} });
+    await advanceReconnect(2);
+    expect(warn).toHaveBeenCalledTimes(2);
+    expect(midi.state.inputOpens).toBe(2);
+    expect(midi.state.inputCloses).toBe(2);
+
+    midi.state.failOutput = false;
+    await advanceReconnect();
+    midi.dropConnection();
+    midi.state.failOutput = true;
+    await advanceReconnect(2);
+
+    expect(warn).toHaveBeenCalledTimes(3);
+    await surface.stop();
+  });
+
+  test("does not announce connections when a session immediately requests a reconnect", async () => {
+    jest.useFakeTimers();
+    const fixture = await startSessionFailureFixture(() => ({
+      connect(connection) { connection.reconnect(); },
+    }));
+    await advanceReconnect(2);
+
+    expect(fixture.midi.state.inputOpens).toBe(3);
+    expect(fixture.midi.state.inputCloses).toBe(3);
+    expect(fixture.warn).toHaveBeenCalledTimes(1);
+    expect(fixture.info).not.toHaveBeenCalled();
+    await fixture.surface.stop();
+  });
+
+  test("does not repeat warnings while a session reconnects asynchronously before ready", async () => {
+    jest.useFakeTimers();
+    const fixture = await startSessionFailureFixture(() => {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      return {
+        connect(connection) {
+          timer = setTimeout(() => connection.reconnect(), 100);
+        },
+        disconnect() {
+          if (timer !== undefined) clearTimeout(timer);
+          timer = undefined;
+        },
+      };
+    });
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      jest.advanceTimersByTime(100);
+      await flushPromises();
+      if (attempt < 2) {
+        await advanceReconnect();
+      }
+    }
+
+    expect(fixture.midi.state.inputOpens).toBe(3);
+    expect(fixture.midi.state.inputCloses).toBe(3);
+    expect(fixture.warn).toHaveBeenCalledTimes(1);
+    expect(fixture.info).not.toHaveBeenCalled();
+    await fixture.surface.stop();
+  });
+
+  test("reports a repeatedly thrown session connection once", async () => {
+    jest.useFakeTimers();
+    const fixture = await startSessionFailureFixture(() => ({
+      connect() { throw new Error("session failed"); },
+    }));
+    await advanceReconnect(2);
+
+    expect(fixture.midi.state.inputOpens).toBe(3);
+    expect(fixture.midi.state.inputCloses).toBe(3);
+    expect(fixture.warn).toHaveBeenCalledTimes(1);
+    expect(fixture.info).not.toHaveBeenCalled();
+    await fixture.surface.stop();
   });
 
   test("cleans up every candidate handle when stop wins output opening", async () => {
@@ -374,6 +508,19 @@ async function startFixture() {
     emitJoystick: async (event) => { joystick.push(event); },
   });
   return { midi, keys, joystick, surface };
+}
+
+async function startSessionFailureFixture(createSession: () => ControllerSession) {
+  const midi = createMidiTestBackend();
+  const info = jest.fn();
+  const warn = jest.fn();
+  const surface = createMidiSurface(
+    { ...profile, createSession },
+    { type: "test" },
+    { midi: midi.backend, logger: { ...quietLogger, info, warn } },
+  );
+  await surface.start({ emitKey: async () => {}, emitJoystick: async () => {} });
+  return { midi, info, warn, surface };
 }
 
 async function advanceReconnect(cycles = 1): Promise<void> {
