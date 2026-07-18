@@ -27,7 +27,7 @@ The PreSonus ATOM MIDI controller is the first implemented device and current re
 
 Connect or pair your device and paste the following into a fresh Codex session/project, along with the type/model of hardware:
 
-> Follow the instructions at https://github.com/scf4/codex-midi/blob/main/docs/setup-with-codex.md and set up <my-device-model>
+> Follow the instructions at https://github.com/scf4/codex-midi/blob/main/docs/setup-with-codex.md and set up \<my-device-model\>
 
 ---
 
