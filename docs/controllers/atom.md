@@ -93,12 +93,12 @@ The encoder uses relative CC 14 messages:
 
 | Physical direction | Value |
 | --- | ---: |
-| Clockwise | 1 |
-| Counter-clockwise | 65 |
+| Clockwise | 65 |
+| Counter-clockwise | 1 |
 
-Live in-app testing on 17 July 2026 confirmed that value 1 must produce the
-clockwise Micro event and value 65 the counter-clockwise event. The profile
-emits one Micro step after five pulses and enforces a 500 ms minimum interval.
+Live in-app testing on 18 July 2026 confirmed that value 65 must produce the
+clockwise Micro event and value 1 the counter-clockwise event. The profile
+emits one Micro step after five pulses and enforces a 333 ms minimum interval.
 These values form one relative-encoder declaration in the ATOM adapter, not
 runtime configuration.
 

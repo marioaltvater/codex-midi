@@ -95,10 +95,10 @@ const ATOM_PROFILE = {
   mapping: ATOM_MAPPING,
   encoder: {
     cc: 14,
-    clockwise: [1],
-    counterClockwise: [65],
+    clockwise: [65],
+    counterClockwise: [1],
     pulsesPerStep: 5,
-    minStepIntervalMs: 500,
+    minStepIntervalMs: 333,
     pulseSequenceTimeoutMs: 500,
   },
   createSession: createAtomNativeModeSession,

@@ -123,16 +123,16 @@ describe("ATOM controller", () => {
     await fixture.surface.stop();
   });
 
-  test("normalizes both encoder directions and caps each burst at one step", async () => {
+  test("normalizes physical encoder directions and caps each burst at one step", async () => {
     setSystemTime(1_000);
     const fixture = await startAtom();
     fixture.midi.emit(NATIVE_MODE_REPLY);
-    for (let pulse = 0; pulse < 10; pulse += 1) fixture.midi.emit([0xb0, 14, 1]);
+    for (let pulse = 0; pulse < 10; pulse += 1) fixture.midi.emit([0xb0, 14, 65]);
     await flushPromises();
     expect(fixture.keys).toEqual([{ key: "ENC_CW", act: 2 }]);
 
-    setSystemTime(1_501);
-    for (let pulse = 0; pulse < 5; pulse += 1) fixture.midi.emit([0xb0, 14, 65]);
+    setSystemTime(1_333);
+    for (let pulse = 0; pulse < 5; pulse += 1) fixture.midi.emit([0xb0, 14, 1]);
     await flushPromises();
     expect(fixture.keys.at(-1)).toEqual({ key: "ENC_CC", act: 2 });
     await fixture.surface.stop();
