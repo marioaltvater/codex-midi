@@ -62,7 +62,7 @@ class FakeSurface implements ControllerSurface {
     this.sink = sink;
   }
 
-  async applyLighting(state: Readonly<CodexLightingState>): Promise<void> {
+  async applyFeedback(state: Readonly<CodexLightingState>): Promise<void> {
     this.lighting.push(structuredClone(state));
   }
 
@@ -148,6 +148,25 @@ test("engine applies minimized thread and zone lighting and acknowledges each ca
   assert.deepEqual(transport.messages(), [
     { id: 4, result: true },
     { id: 5, result: true },
+  ]);
+  await engine.stop();
+});
+
+test("engine accepts feedback calls for a controller without feedback output", async () => {
+  const transport = new FakeTransport();
+  const surface: ControllerSurface = {
+    async start() {},
+    async stop() {},
+  };
+  const engine = new Project2077Engine(transport, surface);
+  await engine.start();
+  await transport.connect();
+  await transport.send({ method: "v.oai.thstatus", params: [], id: 6 });
+  await transport.send({ method: "v.oai.rgbcfg", params: {}, id: 7 });
+
+  assert.deepEqual(transport.messages(), [
+    { id: 6, result: true },
+    { id: 7, result: true },
   ]);
   await engine.stop();
 });

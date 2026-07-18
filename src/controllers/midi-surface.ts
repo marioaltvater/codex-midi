@@ -1,7 +1,7 @@
 /**
  * Adapts a controller profile to the engine-facing ControllerSurface. This is
- * the shared home for MIDI decoding, aliases, encoder pacing, reconnects, and
- * lighting replay; vendor protocols stay inside controller profiles.
+ * the shared home for MIDI decoding, modifiers, actions, aliases, encoder
+ * pacing, reconnects, and lighting replay. Vendor protocols stay in profiles.
  */
 
 import type {
@@ -12,19 +12,23 @@ import type {
 } from "../core/codex-micro.js";
 import {
   midi,
+  type MidiBackend,
   type MidiInputHandle,
   type MidiMessage,
   type MidiOutputHandle,
 } from "../midi/index.js";
 import type { ControllerConfig } from "../config.js";
+import type { CodexAppAction, ControllerContext } from "./controller.js";
 import type {
   ControllerConnection,
-  ControllerContext,
   DisconnectReason,
+  EncoderTarget,
   JoystickDirection,
   LightingFrame,
+  MidiActionBinding,
   MidiControllerProfile,
-} from "./controller-profile.js";
+  RelativeEncoder,
+} from "./midi-profile.js";
 
 type LogicalTarget =
   | { readonly kind: "key"; readonly key: CodexButtonKey }
@@ -55,6 +59,7 @@ export function createMidiSurface(
   profile: MidiControllerProfile,
   config: Readonly<ControllerConfig>,
   context: ControllerContext,
+  backend: MidiBackend = midi,
 ): ControllerSurface {
   const inputName = config.inputName ?? profile.ports.input;
   const outputName =
@@ -66,7 +71,13 @@ export function createMidiSurface(
   const notes = profile.mapping.notes ?? {};
   const buttons = profile.mapping.buttons ?? {};
   const joystick = profile.mapping.joystick ?? {};
-  const backend = context.midi ?? midi;
+  const noteActions = profile.mapping.actions?.notes ?? {};
+  const buttonActions = profile.mapping.actions?.buttons ?? {};
+  const shiftNotes = new Set(profile.mapping.shift?.notes ?? []);
+  const shiftButtons = new Set(profile.mapping.shift?.buttons ?? []);
+  const encoders = new Map(
+    profile.encoders?.map((encoder) => [encoder.cc, encoder]) ?? [],
+  );
   const logger = context.logger;
   const session = profile.createSession?.();
 
@@ -82,7 +93,10 @@ export function createMidiSurface(
   const renderedLighting = new Map<string, string>();
   const heldControls = new Map<string, string>();
   const heldTargets = new Map<string, HeldTarget>();
-  let encoderState: EncoderState | undefined;
+  const heldActionSources = new Set<string>();
+  const heldShiftSources = new Set<string>();
+  const encoderStates = new Map<number, EncoderState>();
+  let shiftPressed = false;
   let lastConnectionFailure: ConnectionFailure | undefined;
 
   const connection: ControllerConnection = {
@@ -90,6 +104,9 @@ export function createMidiSurface(
     send(message) {
       if (output === undefined) throw new Error("MIDI output is not connected");
       output.send(message);
+    },
+    dispatchAction(action) {
+      dispatchAppAction(action);
     },
     ready() {
       if (
@@ -138,7 +155,7 @@ export function createMidiSurface(
       }
     },
 
-    async applyLighting(state) {
+    async applyFeedback(state) {
       latestLighting = state;
       replayLighting();
     },
@@ -265,22 +282,47 @@ export function createMidiSurface(
     if (decoded === undefined || decoded.channel !== inputChannel) return;
 
     if (decoded.kind === "note") {
+      const source = `note:${decoded.channel}:${decoded.number}`;
+      if (shiftNotes.has(decoded.number)) {
+        updateShift(source, decoded.pressed);
+        return;
+      }
+
+      const action = noteActions[decoded.number];
+      if (action !== undefined && action !== null) {
+        updateAction(source, action, decoded.pressed);
+        return;
+      }
+
       const key = notes[decoded.number];
       if (key !== undefined && key !== null) {
-        updateControl(`note:${decoded.channel}:${decoded.number}`, { kind: "key", key }, decoded.pressed);
+        updateControl(source, { kind: "key", key }, decoded.pressed);
       }
       return;
     }
 
-    if (decoded.number === profile.encoder?.cc) {
-      handleEncoder(decoded.value);
+    const source = `cc:${decoded.channel}:${decoded.number}`;
+    if (shiftButtons.has(decoded.number)) {
+      updateShift(source, decoded.value > 0);
+      return;
+    }
+
+    const action = buttonActions[decoded.number];
+    if (action !== undefined && action !== null) {
+      updateAction(source, action, decoded.value > 0);
+      return;
+    }
+
+    const encoder = encoders.get(decoded.number);
+    if (encoder !== undefined) {
+      handleEncoder(encoder, decoded.value);
       return;
     }
 
     const key = buttons[decoded.number];
     if (key !== undefined && key !== null) {
       updateControl(
-        `cc:${decoded.channel}:${decoded.number}`,
+        source,
         { kind: "key", key },
         decoded.value > 0,
       );
@@ -290,16 +332,15 @@ export function createMidiSurface(
     const direction = joystick[decoded.number];
     if (direction !== undefined && direction !== null) {
       updateControl(
-        `cc:${decoded.channel}:${decoded.number}`,
+        source,
         { kind: "joystick", direction },
         decoded.value > 0,
       );
     }
   }
 
-  function handleEncoder(value: number): void {
-    const encoder = profile.encoder;
-    if (encoder === undefined || sink === undefined) return;
+  function handleEncoder(encoder: RelativeEncoder, value: number): void {
+    if (sink === undefined) return;
     const direction = encoder.clockwise.includes(value)
       ? "clockwise"
       : encoder.counterClockwise.includes(value)
@@ -308,7 +349,7 @@ export function createMidiSurface(
     if (direction === undefined) return;
 
     const timestamp = Date.now();
-    const previous = encoderState;
+    const previous = encoderStates.get(encoder.cc);
     if (previous !== undefined && timestamp - previous.lastStepAt < encoder.minStepIntervalMs) {
       return;
     }
@@ -319,18 +360,56 @@ export function createMidiSurface(
     const pulses = continues ? previous.pulses + 1 : 1;
     const lastStepAt = previous?.lastStepAt ?? Number.NEGATIVE_INFINITY;
     if (pulses < encoder.pulsesPerStep) {
-      encoderState = { direction, pulses, lastPulseAt: timestamp, lastStepAt };
+      encoderStates.set(encoder.cc, {
+        direction,
+        pulses,
+        lastPulseAt: timestamp,
+        lastStepAt,
+      });
       return;
     }
 
-    encoderState = {
+    encoderStates.set(encoder.cc, {
       direction,
       pulses: 0,
       lastPulseAt: timestamp,
       lastStepAt: timestamp,
-    };
-    const key = direction === "clockwise" ? "ENC_CW" : "ENC_CC";
-    dispatch(sink.emitKey({ key, act: 2 }), `encoder ${direction}`);
+    });
+    emitEncoderTarget(encoder.targets[direction], encoder.cc, direction);
+  }
+
+  function emitEncoderTarget(
+    target: EncoderTarget,
+    cc: number,
+    direction: EncoderState["direction"],
+  ): void {
+    if (target.type === "app-action") {
+      dispatchAppAction(target.action);
+      return;
+    }
+    if (sink !== undefined) {
+      dispatch(sink.emitKey({ key: target.key, act: 2 }), `encoder CC ${cc} ${direction}`);
+    }
+  }
+
+  function updateShift(source: string, pressed: boolean): void {
+    if (pressed) heldShiftSources.add(source);
+    else heldShiftSources.delete(source);
+    shiftPressed = heldShiftSources.size > 0;
+  }
+
+  function updateAction(
+    source: string,
+    binding: MidiActionBinding,
+    pressed: boolean,
+  ): void {
+    if (!pressed) {
+      heldActionSources.delete(source);
+      return;
+    }
+    if (heldActionSources.has(source)) return;
+    heldActionSources.add(source);
+    dispatchAppAction(shiftPressed ? (binding.shifted ?? binding.press) : binding.press);
   }
 
   function updateControl(id: string, target: LogicalTarget, pressed: boolean): void {
@@ -392,7 +471,10 @@ export function createMidiSurface(
     for (const { target } of heldTargets.values()) emitTarget(target, false);
     heldControls.clear();
     heldTargets.clear();
-    encoderState = undefined;
+    heldActionSources.clear();
+    heldShiftSources.clear();
+    encoderStates.clear();
+    shiftPressed = false;
   }
 
   function replayLighting(): void {
@@ -441,6 +523,13 @@ export function createMidiSurface(
   function dispatch(operation: Promise<void>, label: string): void {
     operation.catch((error: unknown) => {
       logger.warn(`Could not deliver ${profile.displayName} ${label} event`, error);
+    });
+  }
+
+  function dispatchAppAction(action: CodexAppAction): void {
+    context.appActions.dispatch(action).catch((error: unknown) => {
+      const message = error instanceof Error ? error.message : String(error);
+      logger.debug(`App action ${action} was unavailable: ${message}`);
     });
   }
 

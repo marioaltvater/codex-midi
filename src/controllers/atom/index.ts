@@ -17,7 +17,7 @@ import type {
   LightingFrame,
   MidiControllerProfile,
   MidiMapping,
-} from "../controller-profile.js";
+} from "../midi-profile.js";
 
 /**
  * ATOM pads count from the bottom-left (note 36) to the top-right (51).
@@ -49,12 +49,25 @@ const ATOM_MAPPING = {
     105: "ENC", // Click / Count In
   },
   joystick: {
-    27: "up",
-    29: "down",
     87: "up",
     89: "down",
     90: "left",
     102: "right",
+  },
+  shift: {
+    buttons: [32],
+  },
+  actions: {
+    buttons: {
+      27: { press: "toggle-plan-mode" }, // Preset / Focus
+      29: {
+        press: "toggle-left-sidebar",
+        shifted: "toggle-review-panel",
+      }, // Show / Hide
+      30: { press: "scroll-task-to-bottom" }, // Nudge / Quantize
+      104: { press: "toggle-maximize-review-panel" }, // Zoom
+      109: { press: "run-environment-action" }, // Play
+    },
   },
 } satisfies MidiMapping;
 
@@ -62,9 +75,15 @@ const NATIVE_MODE_OFF: MidiMessage = [0x8f, 0x00, 0x00];
 const NATIVE_MODE_ON: MidiMessage = [0x8f, 0x00, 0x7f];
 const NATIVE_MODE_REPLY: MidiMessage = [0xbf, 0x7f, 0x7f];
 const ACK_TIMEOUT_MS = 2_000;
+const ATOM_ENCODER_DIRECTIONS = {
+  clockwise: [0x01],
+  counterClockwise: [0x41],
+} as const;
+const ENCODER_SEQUENCE_TIMEOUT_MS = 500;
 
 const FIRST_PAD = 36;
 const LAST_PAD = 51;
+const QUICK_SETUP_MESSAGE_COUNT = LAST_PAD - FIRST_PAD + 1;
 const INACTIVE_AGENT_BRIGHTNESS = 0.3;
 const AUTO_DIM_BRIGHTNESS = 0.2;
 const COMPLETED_THREAD_COLOR = 0x00ff00;
@@ -93,14 +112,42 @@ const ATOM_PROFILE = {
   ports: { input: "ATOM", output: "ATOM" },
   inputChannel: 0,
   mapping: ATOM_MAPPING,
-  encoder: {
-    cc: 14,
-    clockwise: [65],
-    counterClockwise: [1],
-    pulsesPerStep: 5,
-    minStepIntervalMs: 50,
-    pulseSequenceTimeoutMs: 500,
-  },
+  encoders: [
+    {
+      ...ATOM_ENCODER_DIRECTIONS,
+      cc: 14,
+      pulsesPerStep: 5,
+      minStepIntervalMs: 50,
+      pulseSequenceTimeoutMs: ENCODER_SEQUENCE_TIMEOUT_MS,
+      targets: {
+        // Preserve the Micro turn behavior calibrated in ChatGPT.
+        clockwise: { type: "micro-key", key: "ENC_CC" },
+        counterClockwise: { type: "micro-key", key: "ENC_CW" },
+      },
+    },
+    {
+      ...ATOM_ENCODER_DIRECTIONS,
+      cc: 15,
+      pulsesPerStep: 1,
+      minStepIntervalMs: 400,
+      pulseSequenceTimeoutMs: ENCODER_SEQUENCE_TIMEOUT_MS,
+      targets: {
+        clockwise: { type: "app-action", action: "next-task" },
+        counterClockwise: { type: "app-action", action: "previous-task" },
+      },
+    },
+    {
+      ...ATOM_ENCODER_DIRECTIONS,
+      cc: 17,
+      pulsesPerStep: 1,
+      minStepIntervalMs: 0,
+      pulseSequenceTimeoutMs: ENCODER_SEQUENCE_TIMEOUT_MS,
+      targets: {
+        clockwise: { type: "app-action", action: "scroll-task-down" },
+        counterClockwise: { type: "app-action", action: "scroll-task-up" },
+      },
+    },
+  ],
   createSession: createAtomNativeModeSession,
   renderLighting: renderAtomPadLighting,
 } satisfies MidiControllerProfile;
@@ -112,23 +159,43 @@ function createAtomNativeModeSession(): ControllerSession {
   let timer: ReturnType<typeof setTimeout> | undefined;
   let attempts = 0;
   let verified = false;
+  let quickSetupIndex = 0;
 
   return {
     connect(nextConnection) {
       connection = nextConnection;
       attempts = 0;
       verified = false;
+      quickSetupIndex = 0;
       requestNativeMode();
     },
 
     handleMessage(message) {
-      if (
-        message.length !== NATIVE_MODE_REPLY.length ||
-        !message.every((value, index) => value === NATIVE_MODE_REPLY[index])
-      ) {
+      const isNativeModeReply =
+        message.length === NATIVE_MODE_REPLY.length &&
+        message.every((value, index) => value === NATIVE_MODE_REPLY[index]);
+      if (isNativeModeReply) {
+        quickSetupIndex = 0;
+        markReady(true);
+        return true;
+      }
+
+      const [status, note, value] = message;
+      if (status !== 0x89 || value !== 0) {
+        quickSetupIndex = 0;
         return false;
       }
-      markReady(true);
+
+      if (note !== FIRST_PAD + quickSetupIndex) {
+        quickSetupIndex = note === FIRST_PAD ? 1 : 0;
+        return note === FIRST_PAD;
+      }
+
+      quickSetupIndex += 1;
+      if (quickSetupIndex === QUICK_SETUP_MESSAGE_COUNT) {
+        quickSetupIndex = 0;
+        connection?.dispatchAction("open-codex-micro-settings");
+      }
       return true;
     },
 
@@ -138,6 +205,7 @@ function createAtomNativeModeSession(): ControllerSession {
       connection = undefined;
       attempts = 0;
       verified = false;
+      quickSetupIndex = 0;
     },
   };
 

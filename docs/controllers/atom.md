@@ -7,9 +7,10 @@ file:
 src/controllers/atom/index.ts
 ```
 
-That file owns the physical mapping, relative encoder, native-mode session, and
-pad-lighting renderer. Shared Note/CC decoding, aliases, pacing, reconnects,
-and lighting replay come from `src/controllers/midi-surface.ts`.
+That file owns the physical mapping, relative encoders, native-mode session,
+composite Quick Setup message, and pad-lighting renderer. Shared Note/CC
+decoding, aliases, modifiers, controller actions, pacing, reconnects, and
+lighting replay come from `src/controllers/midi-surface.ts`.
 
 Default CoreMIDI input and output names are both `ATOM`. A configuration file
 may override those exact port names; it cannot override the mappings or ATOM
@@ -48,65 +49,110 @@ change with task recency.
 
 ## Dedicated controls
 
-| ATOM control | MIDI | Emulated Micro input |
+| ATOM control | MIDI | Codex behavior |
 | --- | ---: | --- |
 | Encoder 1 turn | CC 14 | Micro encoder turn |
-| Set Loop | CC 85 | Encoder click (`ENC`) |
-| Song Setup, orange rectangular button | CC 86 | Encoder click (`ENC`) |
-| Select | CC 103 | Encoder click (`ENC`) |
-| Click / Count In | CC 105 | Encoder click (`ENC`) |
-| Preset / Focus | CC 27 | Joystick up |
-| Up | CC 87 | Joystick up |
-| Show / Hide | CC 29 | Joystick down |
-| Down | CC 89 | Joystick down |
-| Left | CC 90 | Joystick left |
-| Right | CC 102 | Joystick right |
+| Encoder 2 turn | CC 15 | Previous task counter-clockwise; next task clockwise |
+| Encoder 3 turn | CC 16 | Intentionally unmapped |
+| Encoder 4 turn | CC 17 | Scroll visible task up counter-clockwise; down clockwise |
+| Set Loop | CC 85 | Micro encoder click (`ENC`) |
+| Song Setup, orange rectangular button | CC 86 | Micro encoder click (`ENC`) |
+| Select | CC 103 | Micro encoder click (`ENC`) |
+| Click / Count In | CC 105 | Micro encoder click (`ENC`) |
+| Shift | CC 32 | Hold the shifted action layer |
+| Show / Hide | CC 29 | Toggle the left sidebar |
+| Shift + Show / Hide | CC 32 + CC 29 | Toggle the review panel |
+| Preset / Focus | CC 27 | Toggle Plan mode |
+| Nudge / Quantize | CC 30 | Scroll to the bottom of the visible task |
+| Quick Setup, black circular button | Channel-10 note-off sweep | Open Codex Micro settings |
+| Zoom | CC 104 | Maximize or restore the review panel |
+| Play | CC 109 | Run the default environment action |
+| Up | CC 87 | Micro joystick up |
+| Down | CC 89 | Micro joystick down |
+| Left | CC 90 | Micro joystick left |
+| Right | CC 102 | Micro joystick right |
 
-Repeated destinations are aliases. Set Loop, Song Setup, Select, and Click /
-Count In all operate the same Micro encoder switch. Holding any alias keeps
-`ENC` pressed; ChatGPT decides when the press becomes the Micro settings
-long-press.
+Set Loop, Song Setup, Select, and Click / Count In are reference-counted aliases
+for the same Micro encoder switch. Holding any alias keeps `ENC` pressed;
+ChatGPT decides when the press becomes the Micro-settings long press.
 
-Preset and Up similarly alias Micro up, while Show/Hide and Down alias Micro
-down. Releasing one physical alias cannot release a direction another alias
-still holds. The action assigned to a direction, such as Plan mode, is a
-ChatGPT Codex Micro setting rather than ATOM-specific automation.
+Up, Down, Left, and Right remain genuine Micro joystick inputs. Preset and
+Show/Hide no longer alias those directions: they use the separate controller-
+action lane, so their behavior does not depend on configurable keyboard
+shortcuts.
 
-### Quick Setup limitation
+Encoder 2 reacts on the first detent but throttles rapid successive task
+changes. Encoder 4 uses small, precise scroll steps when turned slowly and
+accelerates as its captured ticks arrive more quickly.
+
+Shift is held while CC 32 is nonzero and released immediately at value zero:
+
+```text
+B0 20 7F   Shift down
+B0 20 00   Shift up
+```
+
+The shared MIDI surface clears modifier state when the controller disconnects.
+Shift changes Show/Hide to the review-panel action; it does not emit both the
+shifted and unshifted action.
+
+### Quick Setup composite message
 
 The black circular **Quick Setup** button is not the orange rectangular
-**Song Setup** button. PreSonus's published ATOM MIDI table gives it no distinct
-event. A targeted live capture also found no press event: it produced only a
-hardware-local channel-10 pad-release sweep. There is no stable message to map,
-so Quick Setup remains local to the hardware.
+**Song Setup** button. It emits no conventional press message. In native mode,
+one click produces an ordered channel-10 note-off sweep covering all 16 pads:
 
-Shift+Show/Hide is likewise not documented as a distinct event. Keyboard
-shortcuts and surplus-controller actions remain outside the fixed Codex Micro
-surface.
+```text
+89 24 00
+89 25 00
+...
+89 33 00
+```
 
-## Encoder
+The ATOM session recognizes only that complete sequence and then requests the
+Codex Micro settings route once. A mismatch resets the partial sequence, and a
+partial sweep has no action. This composite signature is ATOM-specific and
+does not complicate the shared MIDI decoder.
+
+Editor, Record, and Stop remain unmapped. ChatGPT currently exposes no clean
+controller actions for opening the project in its default editor or stopping the
+active environment action, and this project does not synthesize keyboard
+shortcuts as a fallback.
+
+## Encoders
 
 ATOM Encoder 1 is not itself a MIDI push switch; the button aliases above
 provide click and hold.
 
-The encoder uses relative CC 14 messages:
+The mapped encoders use relative CC messages with the same captured direction
+values:
 
 | Physical direction | Value |
 | --- | ---: |
-| Clockwise | 65 |
-| Counter-clockwise | 1 |
+| Clockwise | 1 (`01`) |
+| Counter-clockwise | 65 (`41`) |
 
-Live in-app testing on 18 July 2026 confirmed that value 65 must produce the
-clockwise Micro event and value 1 the counter-clockwise event. The profile
-emits one Micro step after five pulses. A short 50 ms guard collapses duplicate
-messages from one physical movement without delaying adjacent detents. These
-values form one relative-encoder declaration in the ATOM adapter, not runtime
-configuration.
+An input-only capture on 18 July 2026 confirmed the same relative format for
+the mapped encoders: clockwise sends `01`, while counter-clockwise sends `41`
+on CC 14, 15, and 17. Encoder 3 was also observed on CC 16 but remains unused.
+The monitor's leading `+...ms` value is elapsed time since the previous
+message; it is not part of the MIDI event and does not control speed.
 
-In ChatGPT's default knob mode, turning moves among composer controls or their
-options, click opens or selects the highlighted control, and hold opens Codex
-Micro settings. In Reasoning mode, ChatGPT applies turns to reasoning effort.
-The adapter emits the physical Micro events and does not choose the app mode.
+Encoder 1 retains its separately calibrated Micro behavior: five physical
+ticks produce one Micro step, with a 50 ms guard against duplicate steps. Its
+Micro event names are deliberately opposite the ATOM wire direction because
+that mapping was verified in ChatGPT. Encoder 2 changes task on its first tick
+and rate-limits subsequent changes to one every 400 ms. Encoder 4 sends every
+tick as a precise native wheel event, using a smaller step for slow turns and a
+larger step for fast turns. Encoder 3 is left unused. The values and targets
+live in the ATOM adapter, not runtime configuration.
+
+Encoder 1 remains a faithful Micro knob: in ChatGPT's default knob mode it
+moves among composer controls or options, click opens or selects the highlighted
+control, and hold opens Codex Micro settings. In Reasoning mode, ChatGPT applies
+turns to reasoning effort. Encoder 2 instead moves between tasks, while Encoder
+4 sends native scroll steps to the focused ChatGPT task. These additional
+actions never enter the Project2077 report stream.
 
 ## Lighting
 
@@ -166,33 +212,37 @@ that supports analog movement.
 
 ## Evidence and verification
 
-Standard notes, CC assignments, channels, and Quick Setup behavior are grounded
-in PreSonus's [ATOM Owner's Manual](https://www.fmicassets.com/Damroot/Original/10078/OM_ATOM_EN.pdf),
-especially its MIDI Mapping and Advanced Setup sections. Native-mode and RGB
-messages are interoperability observations from the user-owned controller and
-the previously working bridge; the public manual does not specify that host
-protocol.
+Standard notes, CC assignments, and channels are grounded in PreSonus's
+[ATOM Owner's Manual](https://www.fmicassets.com/Damroot/Original/10078/OM_ATOM_EN.pdf),
+especially its MIDI Mapping and Advanced Setup sections. Shift's press/release
+form, the Quick Setup composite sequence, native-mode negotiation, and RGB
+messages are interoperability observations from authorized local ATOM hardware
+and the working bridge; the public manual does not specify those host details.
 
-The channel order and intensity range were cross-checked against the raw
+The channel order and intensity range were independently verified on the local
+controller. Two public projects were also consulted as research leads: the raw
 [Studio One capture](https://github.com/kmitch95120/Reaper-ATOM-Integration/blob/c05c404f8d1e5c24d71d363452cf333f81bd94f2/Explore/new_song_capture.txt#L9-L31)
 and [tested color table](https://github.com/kmitch95120/Reaper-ATOM-Integration/blob/c05c404f8d1e5c24d71d363452cf333f81bd94f2/REAPER/Scripts/ATOM/COLORS.lua#L12-L28)
-in the user-directed Reaper ATOM research. The breathing value is corroborated
-by an independent [ATOM protocol experiment](https://github.com/EMATech/AtomCtrl/blob/dd8ea54ae97a247efba7854b97ee836e6ea5fcea/main.py#L85-L97)
-and by the selected-task effect observed on this controller. These sources were
-used as protocol evidence only; no implementation code was copied.
+in Reaper-ATOM-Integration, which has no declared license, and an independent
+[ATOM protocol experiment](https://github.com/EMATech/AtomCtrl/blob/dd8ea54ae97a247efba7854b97ee836e6ea5fcea/main.py#L85-L97)
+licensed under GPL-3.0. They were used only to corroborate questions and local
+observations; no implementation code or other expressive material was copied.
 
-Evidence collected on 16–17 July 2026 used macOS 27.0, ChatGPT build **5440 /
-26.707.91948**, and exact input and output names `ATOM`; the controller firmware
-was not queried. An input-only capture used:
+Evidence collected on 16–18 July 2026 used macOS 27.0, ChatGPT
+**26.715.31925**, build **5551**, and exact input and output names `ATOM`; the
+controller firmware was not queried. An input-only capture used:
 
 ```sh
-bun src/cli.ts midi monitor --input "ATOM"
+bun run midi:monitor -- --input "ATOM"
 ```
 
-A manual device check confirmed both ports, native-mode acknowledgement,
-in-app control delivery, lighting output, and clean exit. The same live pass
-identified and corrected the reversed encoder direction.
+A manual device check confirmed both ports, native-mode acknowledgement, the
+established Micro controls, lighting output, and clean exit. The same live pass
+identified and corrected Encoder 1's Micro event mapping. A later input-only
+capture established the mapped encoders' physical direction bytes. A final
+in-app pass on 18 July confirmed the controller-action mappings and additional
+encoders behave as documented.
 
-The tracked ATOM regression exercises this adapter through public controller
-construction and raw MIDI rather than importing private helpers or copying its
+The tracked ATOM regression exercises the exported profile through the shared
+MIDI surface and raw input rather than importing private helpers or copying its
 mapping object. That automated coverage protects the reference profile.

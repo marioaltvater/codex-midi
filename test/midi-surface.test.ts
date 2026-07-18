@@ -4,12 +4,14 @@ import {
   type CodexJoystickEvent,
   type CodexKeyEvent,
 } from "../src/core/codex-micro.js";
+import type { CodexAppAction } from "../src/controllers/controller.js";
 import { createController, listControllerIds } from "../src/controllers/index.js";
 import { createMidiSurface } from "../src/controllers/midi-surface.js";
 import type {
+  ControllerConnection,
   ControllerSession,
   MidiControllerProfile,
-} from "../src/controllers/controller-profile.js";
+} from "../src/controllers/midi-profile.js";
 import {
   createMidiTestBackend,
   flushPromises,
@@ -24,19 +26,49 @@ const profile = {
     notes: { 36: "ACT06", 37: "ACT06" },
     buttons: { 10: "ENC" },
     joystick: { 20: "up", 21: "up" },
+    shift: { notes: [60], buttons: [32] },
+    actions: {
+      notes: {
+        40: { press: "previous-task", shifted: "next-task" },
+      },
+      buttons: {
+        29: { press: "toggle-left-sidebar", shifted: "toggle-review-panel" },
+        30: { press: "toggle-plan-mode" },
+      },
+    },
   },
-  encoder: {
-    cc: 14,
-    clockwise: [1],
-    counterClockwise: [65],
-    pulsesPerStep: 2,
-    minStepIntervalMs: 100,
-    pulseSequenceTimeoutMs: 50,
-  },
+  encoders: [
+    {
+      cc: 14,
+      clockwise: [1],
+      counterClockwise: [65],
+      targets: {
+        clockwise: { type: "micro-key", key: "ENC_CW" },
+        counterClockwise: { type: "micro-key", key: "ENC_CC" },
+      },
+      pulsesPerStep: 2,
+      minStepIntervalMs: 100,
+      pulseSequenceTimeoutMs: 50,
+    },
+    {
+      cc: 15,
+      clockwise: [1],
+      counterClockwise: [65],
+      targets: {
+        clockwise: { type: "app-action", action: "next-task" },
+        counterClockwise: { type: "app-action", action: "previous-task" },
+      },
+      pulsesPerStep: 2,
+      minStepIntervalMs: 100,
+      pulseSequenceTimeoutMs: 50,
+    },
+  ],
   renderLighting(state) {
     return [{ id: "status", messages: [[0x90, 1, Math.round(state.keys.brightness * 127)]] }];
   },
 } satisfies MidiControllerProfile;
+
+const noopAppActions = { async dispatch() {} };
 
 afterEach(() => {
   setSystemTime();
@@ -91,6 +123,53 @@ describe("MIDI controller", () => {
     await fixture.surface.stop();
   });
 
+  test("dispatches note and CC actions once per press with shift precedence and fallback", async () => {
+    const fixture = await startFixture();
+
+    fixture.midi.emit([0xb0, 29, 127]);
+    fixture.midi.emit([0xb0, 29, 127]);
+    fixture.midi.emit([0xb0, 29, 0]);
+
+    fixture.midi.emit([0x90, 60, 127]);
+    fixture.midi.emit([0xb0, 32, 127]);
+    fixture.midi.emit([0x80, 60, 0]);
+    fixture.midi.emit([0xb0, 29, 127]);
+    fixture.midi.emit([0xb0, 29, 0]);
+    fixture.midi.emit([0xb0, 30, 127]);
+    fixture.midi.emit([0xb0, 30, 0]);
+    fixture.midi.emit([0xb0, 32, 0]);
+
+    fixture.midi.emit([0x90, 40, 127]);
+    fixture.midi.emit([0x90, 40, 127]);
+    fixture.midi.emit([0x80, 40, 0]);
+    await flushPromises();
+
+    expect(fixture.actions).toEqual([
+      "toggle-left-sidebar",
+      "toggle-review-panel",
+      "toggle-plan-mode",
+      "previous-task",
+    ]);
+    await fixture.surface.stop();
+  });
+
+  test("clears shift and held action sources across disconnects", async () => {
+    const fixture = await startFixture();
+    fixture.midi.emit([0xb0, 32, 127]);
+    fixture.midi.emit([0xb0, 29, 127]);
+    await flushPromises();
+    expect(fixture.actions).toEqual(["toggle-review-panel"]);
+
+    await fixture.surface.stop();
+    fixture.actions.length = 0;
+    await fixture.surface.start({ emitKey: async () => {}, emitJoystick: async () => {} });
+    fixture.midi.emit([0xb0, 29, 127]);
+    await flushPromises();
+
+    expect(fixture.actions).toEqual(["toggle-left-sidebar"]);
+    await fixture.surface.stop();
+  });
+
   test("gears relative encoders, normalizes direction, and rate-limits bursts", async () => {
     setSystemTime(1_000);
     const fixture = await startFixture();
@@ -130,6 +209,52 @@ describe("MIDI controller", () => {
     await fixture.surface.stop();
   });
 
+  test("paces multiple encoders independently and supports app-action targets", async () => {
+    setSystemTime(1_000);
+    const fixture = await startFixture();
+    fixture.midi.emit([0xb0, 14, 1]);
+    fixture.midi.emit([0xb0, 15, 1]);
+    fixture.midi.emit([0xb0, 14, 1]);
+    fixture.midi.emit([0xb0, 15, 1]);
+    await flushPromises();
+
+    expect(fixture.keys).toEqual([{ key: "ENC_CW", act: 2 }]);
+    expect(fixture.actions).toEqual(["next-task"]);
+
+    setSystemTime(1_101);
+    fixture.midi.emit([0xb0, 15, 65]);
+    fixture.midi.emit([0xb0, 15, 65]);
+    await flushPromises();
+    expect(fixture.actions).toEqual(["next-task", "previous-task"]);
+    await fixture.surface.stop();
+  });
+
+  test("keeps rejected app actions quiet without reconnecting MIDI", async () => {
+    const midi = createMidiTestBackend();
+    const debug = jest.fn();
+    const warn = jest.fn();
+    const surface = createMidiSurface(
+      profile,
+      { type: "test" },
+      {
+        logger: { ...quietLogger, debug, warn },
+        appActions: { async dispatch() { throw new Error("action unavailable"); } },
+      },
+      midi.backend,
+    );
+    await surface.start({ emitKey: async () => {}, emitJoystick: async () => {} });
+    midi.emit([0xb0, 29, 127]);
+    await flushPromises();
+
+    expect(debug).toHaveBeenCalledWith(
+      "App action toggle-left-sidebar was unavailable: action unavailable",
+    );
+    expect(warn).not.toHaveBeenCalled();
+    expect(midi.state.inputOpens).toBe(1);
+    expect(midi.state.inputCloses).toBe(0);
+    await surface.stop();
+  });
+
   test("forces held controls up when the surface disconnects", async () => {
     const fixture = await startFixture();
     fixture.midi.emit([0x90, 36, 127]);
@@ -146,13 +271,13 @@ describe("MIDI controller", () => {
     const fixture = await startFixture();
     const lighting = emptyLightingState();
     lighting.keys.brightness = 0.5;
-    await fixture.surface.applyLighting(lighting);
-    await fixture.surface.applyLighting(lighting);
+    await fixture.surface.applyFeedback?.(lighting);
+    await fixture.surface.applyFeedback?.(lighting);
     expect(fixture.midi.state.sent).toEqual([[0x90, 1, 64]]);
 
     const changedLighting = emptyLightingState();
     changedLighting.keys.brightness = 0.25;
-    await fixture.surface.applyLighting(changedLighting);
+    await fixture.surface.applyFeedback?.(changedLighting);
     expect(fixture.midi.state.sent).toEqual([
       [0x90, 1, 64],
       [0x90, 1, 32],
@@ -176,7 +301,7 @@ describe("MIDI controller", () => {
     fixture.midi.state.sendFailures = 1;
     const lighting = emptyLightingState();
     lighting.keys.brightness = 1;
-    await fixture.surface.applyLighting(lighting);
+    await fixture.surface.applyFeedback?.(lighting);
     await advanceReconnect();
     expect(fixture.midi.state.sent).toEqual([[0x90, 1, 127]]);
     await fixture.surface.stop();
@@ -187,16 +312,18 @@ describe("MIDI controller", () => {
     const midi = createMidiTestBackend();
     const info = jest.fn();
     const warn = jest.fn();
-    const surface = createMidiSurface(profile, { type: "test" }, {
-      midi: midi.backend,
-      logger: { ...quietLogger, info, warn },
-    });
+    const surface = createMidiSurface(
+      profile,
+      { type: "test" },
+      { logger: { ...quietLogger, info, warn }, appActions: noopAppActions },
+      midi.backend,
+    );
     await surface.start({ emitKey: async () => {}, emitJoystick: async () => {} });
 
     midi.state.sendFailures = Number.POSITIVE_INFINITY;
     const lighting = emptyLightingState();
     lighting.keys.brightness = 1;
-    await surface.applyLighting(lighting);
+    await surface.applyFeedback?.(lighting);
     await advanceReconnect(2);
 
     expect(midi.state.inputOpens).toBe(3);
@@ -209,10 +336,12 @@ describe("MIDI controller", () => {
   test("closes a partially opened input when output opening fails", async () => {
     const midi = createMidiTestBackend();
     midi.state.failOutput = true;
-    const surface = createMidiSurface(profile, { type: "test" }, {
-      midi: midi.backend,
-      logger: quietLogger,
-    });
+    const surface = createMidiSurface(
+      profile,
+      { type: "test" },
+      { logger: quietLogger, appActions: noopAppActions },
+      midi.backend,
+    );
     await surface.start({ emitKey: async () => {}, emitJoystick: async () => {} });
     expect(midi.state.inputCloses).toBe(1);
     await surface.stop();
@@ -226,10 +355,12 @@ describe("MIDI controller", () => {
       mapping: { notes: { 36: "ACT06" } },
     } satisfies MidiControllerProfile;
     const keys: CodexKeyEvent[] = [];
-    const surface = createMidiSurface(inputOnly, { type: "input-only" }, {
-      midi: midi.backend,
-      logger: quietLogger,
-    });
+    const surface = createMidiSurface(
+      inputOnly,
+      { type: "input-only" },
+      { logger: quietLogger, appActions: noopAppActions },
+      midi.backend,
+    );
     await surface.start({
       emitKey: async (event) => { keys.push(event); },
       emitJoystick: async () => {},
@@ -250,10 +381,12 @@ describe("MIDI controller", () => {
       await listGate;
       return listPorts();
     };
-    const surface = createMidiSurface(profile, { type: "test" }, {
-      midi: midi.backend,
-      logger: quietLogger,
-    });
+    const surface = createMidiSurface(
+      profile,
+      { type: "test" },
+      { logger: quietLogger, appActions: noopAppActions },
+      midi.backend,
+    );
     const starting = surface.start({ emitKey: async () => {}, emitJoystick: async () => {} });
     await flushPromises();
     await surface.stop();
@@ -268,10 +401,12 @@ describe("MIDI controller", () => {
     jest.useFakeTimers();
     const midi = createMidiTestBackend();
     midi.state.listFailures = 1;
-    const surface = createMidiSurface(profile, { type: "test" }, {
-      midi: midi.backend,
-      logger: quietLogger,
-    });
+    const surface = createMidiSurface(
+      profile,
+      { type: "test" },
+      { logger: quietLogger, appActions: noopAppActions },
+      midi.backend,
+    );
     await surface.start({ emitKey: async () => {}, emitJoystick: async () => {} });
     expect(midi.state.inputOpens).toBe(0);
     await advanceReconnect();
@@ -289,10 +424,12 @@ describe("MIDI controller", () => {
     const midi = createMidiTestBackend();
     const warn = jest.fn();
     midi.state.listFailures = Number.POSITIVE_INFINITY;
-    const surface = createMidiSurface(profile, { type: "test" }, {
-      midi: midi.backend,
-      logger: { ...quietLogger, warn },
-    });
+    const surface = createMidiSurface(
+      profile,
+      { type: "test" },
+      { logger: { ...quietLogger, warn }, appActions: noopAppActions },
+      midi.backend,
+    );
 
     await surface.start({ emitKey: async () => {}, emitJoystick: async () => {} });
     await advanceReconnect(3);
@@ -313,10 +450,12 @@ describe("MIDI controller", () => {
     const warn = jest.fn();
     midi.state.listFailures = 1;
     midi.state.failOutput = true;
-    const surface = createMidiSurface(profile, { type: "test" }, {
-      midi: midi.backend,
-      logger: { ...quietLogger, warn },
-    });
+    const surface = createMidiSurface(
+      profile,
+      { type: "test" },
+      { logger: { ...quietLogger, warn }, appActions: noopAppActions },
+      midi.backend,
+    );
 
     await surface.start({ emitKey: async () => {}, emitJoystick: async () => {} });
     await advanceReconnect(2);
@@ -404,10 +543,12 @@ describe("MIDI controller", () => {
       await outputGate;
       return openOutput(name);
     };
-    const surface = createMidiSurface(profile, { type: "test" }, {
-      midi: midi.backend,
-      logger: quietLogger,
-    });
+    const surface = createMidiSurface(
+      profile,
+      { type: "test" },
+      { logger: quietLogger, appActions: noopAppActions },
+      midi.backend,
+    );
     const starting = surface.start({ emitKey: async () => {}, emitJoystick: async () => {} });
     await outputStarted;
     await surface.stop();
@@ -429,10 +570,12 @@ describe("MIDI controller", () => {
       },
     } satisfies MidiControllerProfile;
     const midi = createMidiTestBackend();
-    const surface = createMidiSurface(throwingProfile, { type: "test" }, {
-      midi: midi.backend,
-      logger: quietLogger,
-    });
+    const surface = createMidiSurface(
+      throwingProfile,
+      { type: "test" },
+      { logger: quietLogger, appActions: noopAppActions },
+      midi.backend,
+    );
     await surface.start({ emitKey: async () => {}, emitJoystick: async () => {} });
     midi.emit([0xf0, 0x01, 0xf7]);
     await advanceReconnect();
@@ -440,17 +583,61 @@ describe("MIDI controller", () => {
     expect(midi.state.inputCloses).toBeGreaterThanOrEqual(1);
     await surface.stop();
   });
+
+  test("lets a controller session dispatch a semantic app action", async () => {
+    const midi = createMidiTestBackend();
+    const actions: CodexAppAction[] = [];
+    const sessionProfile = {
+      ...profile,
+      createSession() {
+        let connection: ControllerConnection | undefined;
+        return {
+          connect(nextConnection) {
+            connection = nextConnection;
+            connection.ready();
+          },
+          handleMessage(message) {
+            if (message[0] !== 0xf0) return false;
+            connection?.dispatchAction("open-codex-micro-settings");
+            return true;
+          },
+        };
+      },
+    } satisfies MidiControllerProfile;
+    const surface = createMidiSurface(
+      sessionProfile,
+      { type: "test" },
+      {
+        logger: quietLogger,
+        appActions: { async dispatch(action) { actions.push(action); } },
+      },
+      midi.backend,
+    );
+    await surface.start({ emitKey: async () => {}, emitJoystick: async () => {} });
+    midi.emit([0xf0, 0x01, 0xf7]);
+    await flushPromises();
+
+    expect(actions).toEqual(["open-codex-micro-settings"]);
+    expect(midi.state.inputOpens).toBe(1);
+    await surface.stop();
+  });
 });
 
-describe("controller profiles", () => {
+describe("controller registry", () => {
   test("lists and constructs registered profiles", () => {
     expect(listControllerIds()).toEqual(["atom"]);
-    const controller = createController({ type: "atom" }, { logger: quietLogger });
+    const controller = createController(
+      { type: "atom" },
+      { logger: quietLogger, appActions: noopAppActions },
+    );
     expect(controller.displayName).toBe("PreSonus ATOM");
   });
 
   test("rejects unknown controller types", () => {
-    expect(() => createController({ type: "unknown" }, { logger: quietLogger })).toThrow(
+    expect(() => createController(
+      { type: "unknown" },
+      { logger: quietLogger, appActions: noopAppActions },
+    )).toThrow(
       'Unknown controller type "unknown". Available types: atom',
     );
   });
@@ -461,7 +648,7 @@ describe("controller profiles", () => {
       type: "test",
       inputName: "Custom In",
       outputName: "Custom Out",
-    }, { midi: midi.backend, logger: quietLogger });
+    }, { logger: quietLogger, appActions: noopAppActions }, midi.backend);
     await surface.start({ emitKey: async () => {}, emitJoystick: async () => {} });
     expect(midi.state.openedNames).toEqual(["Custom In", "Custom Out"]);
     await surface.stop();
@@ -472,7 +659,7 @@ describe("controller profiles", () => {
     const surface = createMidiSurface(profile, {
       type: "test",
       inputName: "Custom In",
-    }, { midi: midi.backend, logger: quietLogger });
+    }, { logger: quietLogger, appActions: noopAppActions }, midi.backend);
     await surface.start({ emitKey: async () => {}, emitJoystick: async () => {} });
     expect(midi.state.openedNames).toEqual(["Custom In", "Test Out"]);
     await surface.stop();
@@ -487,7 +674,8 @@ describe("controller profiles", () => {
     const surface = createMidiSurface(
       sharedPortProfile,
       { type: "test", inputName: "Custom Port" },
-      { midi: midi.backend, logger: quietLogger },
+      { logger: quietLogger, appActions: noopAppActions },
+      midi.backend,
     );
     await surface.start({ emitKey: async () => {}, emitJoystick: async () => {} });
     expect(midi.state.openedNames).toEqual(["Custom Port", "Custom Port"]);
@@ -499,15 +687,21 @@ async function startFixture() {
   const midi = createMidiTestBackend();
   const keys: CodexKeyEvent[] = [];
   const joystick: CodexJoystickEvent[] = [];
-  const surface = createMidiSurface(profile, { type: "test" }, {
-    midi: midi.backend,
-    logger: quietLogger,
-  });
+  const actions: CodexAppAction[] = [];
+  const surface = createMidiSurface(
+    profile,
+    { type: "test" },
+    {
+      logger: quietLogger,
+      appActions: { async dispatch(action) { actions.push(action); } },
+    },
+    midi.backend,
+  );
   await surface.start({
     emitKey: async (event) => { keys.push(event); },
     emitJoystick: async (event) => { joystick.push(event); },
   });
-  return { midi, keys, joystick, surface };
+  return { midi, keys, joystick, actions, surface };
 }
 
 async function startSessionFailureFixture(createSession: () => ControllerSession) {
@@ -517,7 +711,8 @@ async function startSessionFailureFixture(createSession: () => ControllerSession
   const surface = createMidiSurface(
     { ...profile, createSession },
     { type: "test" },
-    { midi: midi.backend, logger: { ...quietLogger, info, warn } },
+    { logger: { ...quietLogger, info, warn }, appActions: noopAppActions },
+    midi.backend,
   );
   await surface.start({ emitKey: async () => {}, emitJoystick: async () => {} });
   return { midi, info, warn, surface };

@@ -63,7 +63,7 @@ export interface SurfaceInputSink {
 
 export interface ControllerSurface {
   start(sink: SurfaceInputSink): Promise<void>;
-  applyLighting(state: Readonly<CodexLightingState>): Promise<void>;
+  applyFeedback?(state: Readonly<CodexLightingState>): Promise<void>;
   stop(): Promise<void>;
 }
 

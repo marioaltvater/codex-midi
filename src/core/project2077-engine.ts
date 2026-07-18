@@ -190,12 +190,12 @@ export class Project2077Engine implements SurfaceInputSink {
           break;
         case "v.oai.thstatus":
           this.#updateThreadLighting(request.params);
-          await this.#surface.applyLighting(this.#lighting);
+          await this.#surface.applyFeedback?.(this.#lighting);
           result = true;
           break;
         case "v.oai.rgbcfg":
           this.#updateZoneLighting(request.params);
-          await this.#surface.applyLighting(this.#lighting);
+          await this.#surface.applyFeedback?.(this.#lighting);
           result = true;
           break;
         default:

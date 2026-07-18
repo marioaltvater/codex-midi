@@ -9,7 +9,7 @@ import {
   type ControllerConfig,
 } from "./config.js";
 import { createController, listControllerIds } from "./controllers/index.js";
-import type { ControllerLogger } from "./controllers/controller-profile.js";
+import type { ControllerLogger } from "./controllers/controller.js";
 import { Project2077Engine } from "./core/project2077-engine.js";
 import { UnixSocketHostTransport } from "./host/unix-socket-transport.js";
 import { launchChatGPT } from "./host/launch.js";
@@ -67,11 +67,14 @@ async function runBridge(args: string[]): Promise<void> {
     : await loadConfig(configPath);
   const config = mergeBridgeOptions(fileConfig, cli);
   const logger = createLogger(cli.verbose);
-  const controller = createController(config.controller ?? DEFAULT_CONTROLLER, { logger });
   const transport = new UnixSocketHostTransport({
     ...(config.socketPath === undefined ? {} : { socketPath: config.socketPath }),
     ...(process.env.CODEX_MIDI_TOKEN === undefined ? {} : { token: process.env.CODEX_MIDI_TOKEN }),
     logger,
+  });
+  const controller = createController(config.controller ?? DEFAULT_CONTROLLER, {
+    logger,
+    appActions: transport,
   });
   const engine = new Project2077Engine(transport, controller.surface, logger);
 
@@ -243,7 +246,7 @@ function createLogger(verbose: boolean): ControllerLogger {
 const DEFAULT_CONTROLLER: ControllerConfig = { type: "atom" };
 const DEFAULT_CONFIG_PATH = fileURLToPath(new URL("../codex-midi.json", import.meta.url));
 
-const HELP = `codex-midi - use MIDI controllers as a Codex Micro
+const HELP = `codex-midi - use hardware controllers with Codex in ChatGPT
 
 Usage:
   codex-midi bridge [options]       Start the dormant compatibility bridge

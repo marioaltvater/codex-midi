@@ -1,5 +1,7 @@
 import { afterEach, describe, expect, jest, setSystemTime, test } from "bun:test";
-import { createController } from "../src/controllers/index.js";
+import atom from "../src/controllers/atom/index.js";
+import type { CodexAppAction } from "../src/controllers/controller.js";
+import { createMidiSurface } from "../src/controllers/midi-surface.js";
 import {
   emptyLightingState,
   type CodexJoystickEvent,
@@ -10,6 +12,8 @@ import { createMidiTestBackend, flushPromises, quietLogger } from "./midi-test-b
 const NATIVE_MODE_OFF = [0x8f, 0x00, 0x00];
 const NATIVE_MODE_ON = [0x8f, 0x00, 0x7f];
 const NATIVE_MODE_REPLY = [0xbf, 0x7f, 0x7f];
+const TURN_CLOCKWISE = 0x01;
+const TURN_COUNTER_CLOCKWISE = 0x41;
 
 afterEach(() => {
   setSystemTime();
@@ -17,14 +21,14 @@ afterEach(() => {
 });
 
 describe("ATOM controller", () => {
-  test("exposes every mapped control through public controller construction", async () => {
+  test("exposes every mapped control through the shared MIDI surface", async () => {
     const fixture = await startAtom();
     expect(fixture.displayName).toBe("PreSonus ATOM");
     expect(fixture.midi.state.sent).toEqual([NATIVE_MODE_OFF, NATIVE_MODE_ON]);
 
     fixture.midi.emit([0x90, 40, 127]);
     fixture.midi.emit([0x80, 40, 0]);
-    await fixture.surface.applyLighting(emptyLightingState());
+    await fixture.surface.applyFeedback?.(emptyLightingState());
     await flushPromises();
     expect(fixture.keys).toEqual([]);
     expect(fixture.midi.state.sent).toEqual([NATIVE_MODE_OFF, NATIVE_MODE_ON]);
@@ -77,13 +81,11 @@ describe("ATOM controller", () => {
     expect(fixture.midi.state.sent.at(-1)).toEqual(NATIVE_MODE_OFF);
   });
 
-  test("reference-counts all joystick aliases", async () => {
+  test("keeps the directional cluster on the Micro joystick", async () => {
     const fixture = await startAtom();
     fixture.midi.emit(NATIVE_MODE_REPLY);
     const directions = [
-      [27, 0.75],
       [87, 0.75],
-      [29, 0.25],
       [89, 0.25],
       [90, 0.5],
       [102, 0],
@@ -99,14 +101,56 @@ describe("ATOM controller", () => {
         { angle, distance: 0 },
       ]),
     );
+    await fixture.surface.stop();
+  });
 
-    for (const cc of [27, 87]) fixture.midi.emit([0xb0, cc, 127]);
-    for (const cc of [27, 87]) fixture.midi.emit([0xb0, cc, 0]);
+  test("dispatches ATOM side controls with Shift-aware Show/Hide", async () => {
+    const fixture = await startAtom();
+    fixture.midi.emit(NATIVE_MODE_REPLY);
+
+    fixture.midi.emit([0xb0, 29, 127]);
+    fixture.midi.emit([0xb0, 29, 127]);
+    fixture.midi.emit([0xb0, 29, 0]);
+
+    fixture.midi.emit([0xb0, 32, 127]);
+    fixture.midi.emit([0xb0, 29, 127]);
+    fixture.midi.emit([0xb0, 29, 0]);
+    fixture.midi.emit([0xb0, 32, 0]);
+
+    for (const cc of [27, 30, 104, 109]) {
+      fixture.midi.emit([0xb0, cc, 127]);
+      fixture.midi.emit([0xb0, cc, 0]);
+    }
+    for (const cc of [31, 107, 111]) {
+      fixture.midi.emit([0xb0, cc, 127]);
+      fixture.midi.emit([0xb0, cc, 0]);
+    }
     await flushPromises();
-    expect(fixture.joystick.slice(-2)).toEqual([
-      { angle: 0.75, distance: 1 },
-      { angle: 0.75, distance: 0 },
+
+    expect(fixture.actions).toEqual([
+      "toggle-left-sidebar",
+      "toggle-review-panel",
+      "toggle-plan-mode",
+      "scroll-task-to-bottom",
+      "toggle-maximize-review-panel",
+      "run-environment-action",
     ]);
+    expect(fixture.joystick).toEqual([]);
+    expect(fixture.keys).toEqual([]);
+    await fixture.surface.stop();
+  });
+
+  test("opens Micro settings only after the complete Quick Setup sweep", async () => {
+    const fixture = await startAtom();
+    fixture.midi.emit(NATIVE_MODE_REPLY);
+
+    for (const note of [36, 37, 39]) fixture.midi.emit([0x89, note, 0]);
+    await flushPromises();
+    expect(fixture.actions).toEqual([]);
+
+    for (let note = 36; note <= 51; note += 1) fixture.midi.emit([0x89, note, 0]);
+    await flushPromises();
+    expect(fixture.actions).toEqual(["open-codex-micro-settings"]);
     await fixture.surface.stop();
   });
 
@@ -123,23 +167,67 @@ describe("ATOM controller", () => {
     await fixture.surface.stop();
   });
 
-  test("normalizes physical encoder directions and keeps adjacent detents responsive", async () => {
+  test("preserves the calibrated Micro turn behavior and keeps adjacent detents responsive", async () => {
     setSystemTime(1_000);
     const fixture = await startAtom();
     fixture.midi.emit(NATIVE_MODE_REPLY);
-    for (let pulse = 0; pulse < 10; pulse += 1) fixture.midi.emit([0xb0, 14, 65]);
+    for (let pulse = 0; pulse < 10; pulse += 1) {
+      fixture.midi.emit([0xb0, 14, TURN_COUNTER_CLOCKWISE]);
+    }
     await flushPromises();
     expect(fixture.keys).toEqual([{ key: "ENC_CW", act: 2 }]);
 
     setSystemTime(1_050);
-    for (let pulse = 0; pulse < 5; pulse += 1) fixture.midi.emit([0xb0, 14, 65]);
+    for (let pulse = 0; pulse < 5; pulse += 1) {
+      fixture.midi.emit([0xb0, 14, TURN_COUNTER_CLOCKWISE]);
+    }
     await flushPromises();
-    expect(fixture.keys.at(-1)).toEqual({ key: "ENC_CW", act: 2 });
+    expect(fixture.keys).toEqual([
+      { key: "ENC_CW", act: 2 },
+      { key: "ENC_CW", act: 2 },
+    ]);
 
     setSystemTime(1_100);
-    for (let pulse = 0; pulse < 5; pulse += 1) fixture.midi.emit([0xb0, 14, 1]);
+    for (let pulse = 0; pulse < 5; pulse += 1) {
+      fixture.midi.emit([0xb0, 14, TURN_CLOCKWISE]);
+    }
     await flushPromises();
-    expect(fixture.keys.at(-1)).toEqual({ key: "ENC_CC", act: 2 });
+    expect(fixture.keys).toEqual([
+      { key: "ENC_CW", act: 2 },
+      { key: "ENC_CW", act: 2 },
+      { key: "ENC_CC", act: 2 },
+    ]);
+    await fixture.surface.stop();
+  });
+
+  test("starts task navigation immediately, throttles rapid turns, and scrolls once per tick", async () => {
+    setSystemTime(2_000);
+    const fixture = await startAtom();
+    fixture.midi.emit(NATIVE_MODE_REPLY);
+
+    fixture.midi.emit([0xb0, 15, TURN_COUNTER_CLOCKWISE]);
+    setSystemTime(2_050);
+    fixture.midi.emit([0xb0, 15, TURN_CLOCKWISE]);
+    setSystemTime(2_150);
+    fixture.midi.emit([0xb0, 15, TURN_CLOCKWISE]);
+    setSystemTime(2_300);
+    fixture.midi.emit([0xb0, 15, TURN_CLOCKWISE]);
+    setSystemTime(2_400);
+    fixture.midi.emit([0xb0, 15, TURN_CLOCKWISE]);
+    fixture.midi.emit([0xb0, 17, TURN_COUNTER_CLOCKWISE]);
+    fixture.midi.emit([0xb0, 17, TURN_COUNTER_CLOCKWISE]);
+    fixture.midi.emit([0xb0, 17, TURN_CLOCKWISE]);
+    fixture.midi.emit([0xb0, 17, TURN_CLOCKWISE]);
+    await flushPromises();
+
+    expect(fixture.actions).toEqual([
+      "previous-task",
+      "next-task",
+      "scroll-task-up",
+      "scroll-task-up",
+      "scroll-task-down",
+      "scroll-task-down",
+    ]);
     await fixture.surface.stop();
   });
 
@@ -168,7 +256,7 @@ describe("ATOM controller", () => {
 
   test("does not replay lighting for duplicate native-mode acknowledgements", async () => {
     const fixture = await startAtom();
-    await fixture.surface.applyLighting(emptyLightingState());
+    await fixture.surface.applyFeedback?.(emptyLightingState());
     fixture.midi.emit(NATIVE_MODE_REPLY);
     const writesAfterReady = fixture.midi.state.sent.length;
 
@@ -184,7 +272,7 @@ describe("ATOM controller", () => {
     const lighting = emptyLightingState();
     lighting.threads[0] = thread(0, 0xffffff, 1, 4);
     lighting.threads[1] = thread(1, 0x304ffe, 1, 1);
-    await fixture.surface.applyLighting(lighting);
+    await fixture.surface.applyFeedback?.(lighting);
 
     for (const note of [36, 48, 51]) {
       expect(padMessages(fixture.midi.state.sent, note)).toEqual([
@@ -225,7 +313,7 @@ describe("ATOM controller", () => {
     fixture.midi.state.sent.length = 0;
     const sleeping = emptyLightingState();
     sleeping.threads[0]!.color = 0x304ffe;
-    await fixture.surface.applyLighting(sleeping);
+    await fixture.surface.applyFeedback?.(sleeping);
 
     for (const note of [36, 48, 51]) {
       expect(padMessages(fixture.midi.state.sent, note)).toEqual([
@@ -268,7 +356,7 @@ describe("ATOM controller", () => {
     lighting.threads[2] = thread(2, 0x00ff80, 1, 1);
     lighting.threads[3] = thread(3, 0xffcc00, 1, 1);
     lighting.threads[4] = thread(4, 0xff0000, 1, 1);
-    await fixture.surface.applyLighting(lighting);
+    await fixture.surface.applyFeedback?.(lighting);
 
     expect(padMessages(fixture.midi.state.sent, 49)).toEqual([
       [0x90, 49, 127], [0x91, 49, 38], [0x92, 49, 38], [0x93, 49, 38],
@@ -297,7 +385,7 @@ describe("ATOM controller", () => {
     fixture.midi.emit(NATIVE_MODE_REPLY);
     const lighting = emptyLightingState();
     lighting.threads[0] = thread(0, 0xffffff, 1, 4);
-    await fixture.surface.applyLighting(lighting);
+    await fixture.surface.applyFeedback?.(lighting);
     const firstWrites = countMessage(fixture.midi.state.sent, [0x91, 49, 127]);
 
     fixture.midi.dropConnection();
@@ -315,11 +403,19 @@ async function startAtom() {
   const midi = createMidiTestBackend({ inputs: ["ATOM"], outputs: ["ATOM"] });
   const keys: CodexKeyEvent[] = [];
   const joystick: CodexJoystickEvent[] = [];
-  const controller = createController(
+  const actions: CodexAppAction[] = [];
+  const surface = createMidiSurface(
+    atom,
     { type: "atom" },
-    { midi: midi.backend, logger: quietLogger },
+    {
+      logger: quietLogger,
+      appActions: {
+        async dispatch(action) { actions.push(action); },
+      },
+    },
+    midi.backend,
   );
-  await controller.surface.start({
+  await surface.start({
     emitKey: async (event) => { keys.push(event); },
     emitJoystick: async (event) => { joystick.push(event); },
   });
@@ -327,8 +423,9 @@ async function startAtom() {
     midi,
     keys,
     joystick,
-    surface: controller.surface,
-    displayName: controller.displayName,
+    actions,
+    surface,
+    displayName: atom.displayName,
   };
 }
 
