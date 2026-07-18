@@ -98,9 +98,10 @@ The encoder uses relative CC 14 messages:
 
 Live in-app testing on 18 July 2026 confirmed that value 65 must produce the
 clockwise Micro event and value 1 the counter-clockwise event. The profile
-emits one Micro step after five pulses and enforces a 333 ms minimum interval.
-These values form one relative-encoder declaration in the ATOM adapter, not
-runtime configuration.
+emits one Micro step after five pulses. A short 50 ms guard collapses duplicate
+messages from one physical movement without delaying adjacent detents. These
+values form one relative-encoder declaration in the ATOM adapter, not runtime
+configuration.
 
 In ChatGPT's default knob mode, turning moves among composer controls or their
 options, click opens or selects the highlighted control, and hold opens Codex

@@ -98,7 +98,7 @@ const ATOM_PROFILE = {
     clockwise: [65],
     counterClockwise: [1],
     pulsesPerStep: 5,
-    minStepIntervalMs: 333,
+    minStepIntervalMs: 50,
     pulseSequenceTimeoutMs: 500,
   },
   createSession: createAtomNativeModeSession,
