@@ -1,13 +1,14 @@
 <h1 align="center">Codex MIDI</h1>
 
 <p align="center">
-  <strong>Control Codex on macOS or Linux with almost any input device.</strong><br>
+  <strong>Control Codex on macOS with almost any input device.</strong><br>
 
   Don't have a Codex Micro? No problem. Codex MIDI emulates a Codex Micro and implements its full set of features — and a few more.
 </p>
 
 <p align="center">
-  <a href="#requirements"><img alt="macOS and Linux" src="https://img.shields.io/badge/macOS%20%7C%20Linux-supported-111111?logo=linux&amp;logoColor=white"></a>
+  <a href="#requirements"><img alt="macOS supported; Linux experimental" src="https://img.shields.io/badge/macOS-supported-111111?logo=apple&amp;logoColor=white"></a>
+  <a href="#compatibility"><img alt="Linux experimental" src="https://img.shields.io/badge/Linux-experimental-f6c344?logo=linux&amp;logoColor=111111"></a>
   <a href="#requirements"><img alt="Bun 1.3.14 or newer" src="https://img.shields.io/badge/Bun-1.3.14%2B-fbf0df?logo=bun&amp;logoColor=111111"></a>
   <a href="LICENSE"><img alt="MIT license" src="https://img.shields.io/badge/license-MIT-2563eb"></a>
 </p>
@@ -41,7 +42,7 @@ For the complete workflow and contribution requirements, see
 
 ### Requirements
 
-- macOS with the ChatGPT desktop app, or Linux with Codex Desktop installed
+- macOS with the ChatGPT desktop app, or Linux with Codex Desktop installed (experimental)
 - A suitable input device
 - [Bun](https://bun.sh/) 1.3.14 or newer
 
@@ -65,6 +66,7 @@ with `bun run launch -- --chatgpt /path/to/codex-desktop` when needed.
 
 | Area | Current state |
 | --- | --- |
+| **Linux Desktop** | Experimental launcher and virtual-HID fallback. The current Linux renderer does not initialize the private Codex Micro host service during its normal startup flow, so the bridge can remain waiting for Codex Desktop. The launcher does not patch the installed app. |
 | **PreSonus ATOM** | Bundled reference adapter with verified Codex Micro controls and RGB feedback. Its additional controls can show or hide sidebars, toggle Plan mode, expand/restore panels, navigate between tasks more easily, and scroll through chats using the additional rotary encoders and side controls. |
 | **Other controllers** | Use the `add-controller` skill to create an adapter for whatever device you can find. |
 
