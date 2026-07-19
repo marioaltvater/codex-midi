@@ -21,14 +21,16 @@ interface ManualLaunchOptions {
 }
 
 export async function launchChatGPT(options: ManualLaunchOptions = {}): Promise<number> {
-  if (process.platform !== "darwin") throw new Error("codex-midi launch is supported only on macOS");
+  if (process.platform !== "darwin" && process.platform !== "linux") {
+    throw new Error("codex-midi launch is supported only on macOS and Linux");
+  }
   const root = fileURLToPath(new URL("../../", import.meta.url));
   const cli = fileURLToPath(new URL("../cli.ts", import.meta.url));
   const preload = resolve(root, "shim/chatgpt-preload.cjs");
   const chatGPT = resolve(
     options.chatGPTPath ??
       process.env.CHATGPT_BIN ??
-      "/Applications/ChatGPT.app/Contents/MacOS/ChatGPT",
+      defaultChatGPTExecutable(process.platform),
   );
   await requireSafeFile(preload);
   await requireExecutable(chatGPT);
@@ -104,6 +106,12 @@ export async function launchChatGPT(options: ManualLaunchOptions = {}): Promise<
     ]);
     await rm(runtime, { recursive: true, force: true });
   }
+}
+
+export function defaultChatGPTExecutable(platform: NodeJS.Platform): string {
+  if (platform === "darwin") return "/Applications/ChatGPT.app/Contents/MacOS/ChatGPT";
+  if (platform === "linux") return "/usr/bin/codex-desktop";
+  throw new Error(`Unsupported platform: ${platform}`);
 }
 
 async function waitForSocket(

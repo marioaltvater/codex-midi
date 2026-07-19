@@ -511,6 +511,20 @@ function createNodeHidProxy(realNodeHid, options = {}) {
   });
 }
 
+function createVirtualOnlyNodeHid(loadError) {
+  class HIDAsync {
+    static async open(path) {
+      throw new Error(
+        `Real HID device ${String(path)} is unavailable on this platform: ${loadError.message}`,
+      );
+    }
+  }
+  return {
+    devices: () => [],
+    HIDAsync,
+  };
+}
+
 function installScopedNodeHidHook() {
   if (!isMainThread) return;
   if (!process.versions.electron || process.type !== "browser") return;
@@ -524,7 +538,14 @@ function installScopedNodeHidHook() {
       typeof parent.filename === "string" &&
       /[\\/]@worklouder[\\/]wl-device-kit[\\/]dist[\\/]index\.js$/.test(parent.filename)
     ) {
-      const realNodeHid = Reflect.apply(originalLoad, this, [request, parent, isMain]);
+      let realNodeHid;
+      try {
+        realNodeHid = Reflect.apply(originalLoad, this, [request, parent, isMain]);
+      } catch (error) {
+        if (process.platform !== "linux" || !(error instanceof Error)) throw error;
+        realNodeHid = createVirtualOnlyNodeHid(error);
+        log(`real node-hid unavailable; using Linux virtual-only facade: ${error.message}`);
+      }
       if (proxy === undefined) {
         try {
           proxy = createNodeHidProxy(realNodeHid, {
